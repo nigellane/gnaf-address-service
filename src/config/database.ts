@@ -81,7 +81,6 @@ class DatabaseManager {
       // Additional PostgreSQL settings for spatial queries
       options: `
         -c search_path=gnaf,public,postgis
-        -c shared_preload_libraries=postgis
         -c max_parallel_workers_per_gather=4
         -c work_mem=256MB
         -c maintenance_work_mem=1GB

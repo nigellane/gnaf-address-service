@@ -5,6 +5,9 @@
  * Implements bulk data import with progress monitoring and validation
  */
 
+// Load environment variables
+require('dotenv').config();
+
 const { createReadStream } = require('fs');
 const fs = require('fs').promises;
 const path = require('path');
@@ -15,7 +18,7 @@ const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 
 // Import database manager
-const { getDatabase } = require('../src/config/database');
+const { getDatabase } = require('../dist/config/database');
 
 // Configure logger
 const logger = winston.createLogger({
@@ -126,23 +129,42 @@ class GNAFImporter {
   }
 
   async importLocalities() {
-    const csvFile = await this.findCsvFile('LOCALITY', 'locality');
-    if (!csvFile) {
-      logger.warn('Locality CSV file not found, skipping...');
+    // Find only LOCALITY files, not STREET_LOCALITY files
+    const csvFiles = await this.findSpecificCsvFiles('LOCALITY', ['STREET_LOCALITY', 'LOCALITY_ALIAS', 'LOCALITY_POINT', 'LOCALITY_NEIGHBOUR']);
+    if (csvFiles.length === 0) {
+      logger.warn('Locality files not found, skipping...');
       return;
     }
 
-    logger.info(`Importing localities from: ${csvFile}`);
-    this.stats.currentFile = csvFile;
+    logger.info(`Importing localities from ${csvFiles.length} files`);
+    let totalProcessed = 0;
+    let totalInserted = 0;
 
+    for (const csvFile of csvFiles) {
+      logger.info(`Processing localities file: ${path.basename(csvFile)}`);
+      this.stats.currentFile = csvFile;
+      
+      const { processed, inserted } = await this.processLocalityFile(csvFile);
+      totalProcessed += processed;
+      totalInserted += inserted;
+    }
+    
+    logger.info(`Localities import completed: ${totalInserted}/${totalProcessed} records from ${csvFiles.length} files`);
+  }
+
+  async processLocalityFile(csvFile) {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
 
+    // Determine delimiter based on file extension
+    const delimiter = csvFile.endsWith('.psv') ? '|' : ',';
+    
     const parser = parse({
       columns: true,
       skip_empty_lines: true,
-      trim: true
+      trim: true,
+      delimiter: delimiter
     });
 
     const transformer = new Transform({
@@ -150,14 +172,15 @@ class GNAFImporter {
       transform: (record, encoding, callback) => {
         try {
           if (this.validateLocalityRecord(record)) {
+            const stateCode = this.mapStatePidToAbbreviation(record.STATE_PID);
             batch.push([
               record.LOCALITY_PID,
               record.LOCALITY_NAME,
               record.LOCALITY_CLASS_CODE || 'S',
-              record.STATE_ABBREVIATION,
-              record.POSTCODE || null,
-              record.LATITUDE ? parseFloat(record.LATITUDE) : null,
-              record.LONGITUDE ? parseFloat(record.LONGITUDE) : null
+              stateCode,
+              record.PRIMARY_POSTCODE || null,
+              null, // latitude - not in locality file
+              null  // longitude - not in locality file
             ]);
 
             processedCount++;
@@ -189,7 +212,7 @@ class GNAFImporter {
           }
         }
         
-        logger.info(`Localities import completed: ${insertedCount}/${processedCount} records`);
+        logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records`);
         callback();
       }
     });
@@ -199,26 +222,46 @@ class GNAFImporter {
       parser,
       transformer
     );
+    
+    return { processed: processedCount, inserted: insertedCount };
   }
 
   async importStreets() {
-    const csvFile = await this.findCsvFile('STREET', 'street');
-    if (!csvFile) {
-      logger.warn('Street CSV file not found, skipping...');
+    const csvFiles = await this.findCsvFiles('STREET_LOCALITY', 'street');
+    if (csvFiles.length === 0) {
+      logger.warn('Street files not found, skipping...');
       return;
     }
 
-    logger.info(`Importing streets from: ${csvFile}`);
-    this.stats.currentFile = csvFile;
+    logger.info(`Importing streets from ${csvFiles.length} files`);
+    let totalProcessed = 0;
+    let totalInserted = 0;
 
+    for (const csvFile of csvFiles) {
+      logger.info(`Processing streets file: ${path.basename(csvFile)}`);
+      this.stats.currentFile = csvFile;
+      
+      const { processed, inserted } = await this.processStreetFile(csvFile);
+      totalProcessed += processed;
+      totalInserted += inserted;
+    }
+    
+    logger.info(`Streets import completed: ${totalInserted}/${totalProcessed} records from ${csvFiles.length} files`);
+  }
+
+  async processStreetFile(csvFile) {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
 
+    // Determine delimiter based on file extension
+    const delimiter = csvFile.endsWith('.psv') ? '|' : ',';
+    
     const parser = parse({
       columns: true,
       skip_empty_lines: true,
-      trim: true
+      trim: true,
+      delimiter: delimiter
     });
 
     const transformer = new Transform({
@@ -263,7 +306,7 @@ class GNAFImporter {
           }
         }
         
-        logger.info(`Streets import completed: ${insertedCount}/${processedCount} records`);
+        logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records`);
         callback();
       }
     });
@@ -273,29 +316,80 @@ class GNAFImporter {
       parser,
       transformer
     );
+    
+    return { processed: processedCount, inserted: insertedCount };
   }
 
   async importAddresses() {
-    const csvFile = await this.findCsvFile('ADDRESS', 'address');
-    if (!csvFile) {
-      throw new Error('Address CSV file not found');
+    const csvFiles = await this.findCsvFiles('ADDRESS_DETAIL', 'address');
+    if (csvFiles.length === 0) {
+      throw new Error('Address files not found');
     }
 
-    logger.info(`Importing addresses from: ${csvFile}`);
-    this.stats.currentFile = csvFile;
+    logger.info(`Importing addresses from ${csvFiles.length} files`);
+    
+    // Count total records across all files for progress tracking
+    let totalRecords = 0;
+    for (const csvFile of csvFiles) {
+      const count = await this.countFileRecords(csvFile);
+      totalRecords += count;
+    }
+    this.stats.totalRecords = totalRecords;
+    
+    let totalProcessed = 0;
+    let totalInserted = 0;
 
-    // Get total record count for progress tracking
-    await this.countTotalRecords(csvFile);
+    for (const csvFile of csvFiles) {
+      logger.info(`Processing addresses file: ${path.basename(csvFile)}`);
+      this.stats.currentFile = csvFile;
+      
+      const { processed, inserted } = await this.processAddressFile(csvFile);
+      totalProcessed += processed;
+      totalInserted += inserted;
+    }
+    
+    logger.info(`Addresses import completed: ${totalInserted}/${totalProcessed} records from ${csvFiles.length} files`);
+  }
 
+  async countFileRecords(csvFile) {
+    try {
+      let lineCount = 0;
+      const delimiter = csvFile.endsWith('.psv') ? '|' : ',';
+      const parser = parse({ columns: false, delimiter });
+      
+      await pipeline(
+        createReadStream(csvFile),
+        parser,
+        new Transform({
+          objectMode: true,
+          transform(chunk, encoding, callback) {
+            lineCount++;
+            callback();
+          }
+        })
+      );
+
+      return Math.max(0, lineCount - 1); // Subtract header
+    } catch (error) {
+      logger.warn(`Could not count records in ${path.basename(csvFile)}: ${error.message}`);
+      return 0;
+    }
+  }
+
+  async processAddressFile(csvFile) {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
     let lastProgressTime = Date.now();
 
+    // Determine delimiter based on file extension
+    const delimiter = csvFile.endsWith('.psv') ? '|' : ',';
+    
     const parser = parse({
       columns: true,
       skip_empty_lines: true,
-      trim: true
+      trim: true,
+      delimiter: delimiter
     });
 
     const transformer = new Transform({
@@ -353,7 +447,7 @@ class GNAFImporter {
           }
         }
         
-        logger.info(`Addresses import completed: ${insertedCount}/${processedCount} records`);
+        logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records`);
         callback();
       }
     });
@@ -363,6 +457,8 @@ class GNAFImporter {
       parser,
       transformer
     );
+    
+    return { processed: processedCount, inserted: insertedCount };
   }
 
   async processBatch(batch, tableName) {
@@ -556,61 +652,144 @@ class GNAFImporter {
     return 'REGION';
   }
 
+  mapStatePidToAbbreviation(statePid) {
+    const stateMap = {
+      '1': 'NSW',  // New South Wales
+      '2': 'VIC',  // Victoria
+      '3': 'QLD',  // Queensland
+      '4': 'SA',   // South Australia
+      '5': 'WA',   // Western Australia
+      '6': 'TAS',  // Tasmania
+      '7': 'NT',   // Northern Territory
+      '8': 'ACT'   // Australian Capital Territory
+    };
+    return stateMap[String(statePid)] || 'NSW'; // Default to NSW if not found
+  }
+
   validateLocalityRecord(record) {
-    return record.LOCALITY_PID && record.LOCALITY_NAME && record.STATE_ABBREVIATION;
+    return record.LOCALITY_PID && record.LOCALITY_NAME && record.STATE_PID;
   }
 
   validateStreetRecord(record) {
     return record.STREET_LOCALITY_PID && record.STREET_NAME && record.LOCALITY_PID;
   }
 
-  async findCsvFile(pattern1, pattern2) {
+  async findCsvFiles(pattern1, pattern2) {
     try {
-      const files = await fs.readdir(this.dataPath);
+      // Search recursively in G-NAF directory structure
+      const gnafDir = path.join(this.dataPath, 'G-NAF');
+      const files = await this.findFilesRecursively(gnafDir, pattern1, pattern2);
       
-      // Look for files containing the pattern (case insensitive)
-      const csvFiles = files.filter(file => 
-        (file.toLowerCase().includes(pattern1.toLowerCase()) ||
-         file.toLowerCase().includes(pattern2.toLowerCase())) &&
-        (file.endsWith('.csv') || file.endsWith('.psv'))
-      );
-
-      if (csvFiles.length === 0) return null;
+      if (files.length === 0) {
+        logger.warn(`No files found matching patterns: ${pattern1}, ${pattern2}`);
+        return [];
+      }
       
-      // Return the first match
-      return path.join(this.dataPath, csvFiles[0]);
+      logger.info(`Found ${files.length} files for ${pattern1}: ${files.map(f => path.basename(f)).join(', ')}`);
+      return files;
     } catch (error) {
-      logger.error(`Error finding CSV file for ${pattern1}:`, error);
-      return null;
+      logger.error(`Error finding files for ${pattern1}:`, error);
+      return [];
     }
   }
 
-  async countTotalRecords(csvFile) {
+  async findSpecificCsvFiles(pattern, excludePatterns = []) {
     try {
-      logger.info('Counting total records for progress tracking...');
+      // Search recursively in G-NAF directory structure
+      const gnafDir = path.join(this.dataPath, 'G-NAF');
+      const allFiles = await this.findFilesRecursivelySpecific(gnafDir, pattern, excludePatterns);
       
-      let lineCount = 0;
-      const parser = parse({ columns: false });
+      if (allFiles.length === 0) {
+        logger.warn(`No files found matching pattern: ${pattern}`);
+        return [];
+      }
       
-      await pipeline(
-        createReadStream(csvFile),
-        parser,
-        new Transform({
-          objectMode: true,
-          transform(chunk, encoding, callback) {
-            lineCount++;
-            callback();
+      logger.info(`Found ${allFiles.length} files for ${pattern}: ${allFiles.map(f => path.basename(f)).join(', ')}`);
+      return allFiles;
+    } catch (error) {
+      logger.error(`Error finding files for ${pattern}:`, error);
+      return [];
+    }
+  }
+
+  async findFilesRecursively(dir, pattern1, pattern2) {
+    let results = [];
+    
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        
+        if (entry.isDirectory()) {
+          const subResults = await this.findFilesRecursively(fullPath, pattern1, pattern2);
+          results = results.concat(subResults);
+        } else if (entry.isFile()) {
+          const fileName = entry.name.toLowerCase();
+          if ((fileName.includes(pattern1.toLowerCase()) || fileName.includes(pattern2.toLowerCase())) &&
+              (fileName.endsWith('.csv') || fileName.endsWith('.psv')) &&
+              !fileName.includes('alias') && !fileName.includes('neighbour') && 
+              !fileName.includes('point') && !fileName.includes('authority_code') &&
+              !fileName.includes('geocode') && !fileName.includes('mesh_block') && 
+              !fileName.includes('site') && !fileName.includes('feature') &&
+              !fileName.includes('aut_psv')) {
+            results.push(fullPath);
           }
-        })
-      );
-
-      this.stats.totalRecords = Math.max(0, lineCount - 1); // Subtract header
-      logger.info(`Total records to process: ${this.stats.totalRecords}`);
+        }
+      }
     } catch (error) {
-      logger.warn('Could not count total records:', error.message);
-      this.stats.totalRecords = 0;
+      logger.debug(`Error reading directory ${dir}: ${error.message}`);
     }
+    
+    return results;
   }
+
+  async findFilesRecursivelySpecific(dir, pattern, excludePatterns = []) {
+    let results = [];
+    
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        
+        if (entry.isDirectory()) {
+          const subResults = await this.findFilesRecursivelySpecific(fullPath, pattern, excludePatterns);
+          results = results.concat(subResults);
+        } else if (entry.isFile()) {
+          const fileName = entry.name.toLowerCase();
+          
+          // Check if file matches the pattern and ends with csv/psv
+          if (fileName.includes(pattern.toLowerCase()) && 
+              (fileName.endsWith('.csv') || fileName.endsWith('.psv'))) {
+            
+            // Check if any exclude patterns match
+            const shouldExclude = excludePatterns.some(excludePattern => 
+              fileName.includes(excludePattern.toLowerCase())
+            );
+            
+            // Standard exclusions
+            const standardExclusions = [
+              'alias', 'neighbour', 'point', 'authority_code', 'geocode', 
+              'mesh_block', 'site', 'feature', 'aut_psv'
+            ];
+            const hasStandardExclusion = standardExclusions.some(exclusion => 
+              fileName.includes(exclusion)
+            );
+            
+            if (!shouldExclude && !hasStandardExclusion) {
+              results.push(fullPath);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      logger.debug(`Error reading directory ${dir}: ${error.message}`);
+    }
+    
+    return results;
+  }
+
 
   logProgress(type, processed, inserted) {
     const { totalRecords, processedRecords, avgProcessingTime } = this.stats;
