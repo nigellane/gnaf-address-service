@@ -234,7 +234,7 @@ export class MonitoringService {
         daysSinceLastImport,
         isStale,
         quarterlyUpdateDue,
-        nextExpectedUpdate: nextUpdateDate.toISOString().split('T')[0],
+        nextExpectedUpdate: nextUpdateDate.toISOString().split('T')[0]!,
         totalRecords: parseInt(row.total_records),
         lastImportRecords: parseInt(row.last_import_records)
       };
@@ -535,8 +535,8 @@ export class MonitoringService {
       const duration = Date.now() - startTime;
 
       const indexes = result.rows;
-      const unusedIndexes = indexes.filter(idx => parseInt(idx.index_scans) === 0);
-      const lowUsageIndexes = indexes.filter(idx => parseInt(idx.index_scans) < 100);
+      const unusedIndexes = indexes.filter((idx: any) => parseInt(idx.index_scans) === 0);
+      const lowUsageIndexes = indexes.filter((idx: any) => parseInt(idx.index_scans) < 100);
 
       if (unusedIndexes.length > 5) {
         return {

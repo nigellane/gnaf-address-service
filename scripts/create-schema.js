@@ -49,27 +49,16 @@ async function createSchema() {
     
     logger.info('Creating G-NAF database schema...');
     
-    // Execute schema creation
-    await client.query('BEGIN');
+    // Execute schema creation as a single transaction
+    logger.info('Executing schema SQL file...');
     
-    // Split SQL file into individual statements and execute
-    const statements = schemaSql.split(';').filter(stmt => stmt.trim().length > 0);
-    
-    for (let i = 0; i < statements.length; i++) {
-      const statement = statements[i].trim();
-      if (statement.length > 0) {
-        try {
-          await client.query(statement);
-          logger.debug(`Executed statement ${i + 1}/${statements.length}`);
-        } catch (error) {
-          logger.error(`Error in statement ${i + 1}: ${error.message}`);
-          logger.error(`Statement: ${statement.substring(0, 100)}...`);
-          throw error;
-        }
-      }
+    try {
+      await client.query(schemaSql);
+      logger.info('Schema SQL executed successfully');
+    } catch (error) {
+      logger.error(`Schema execution failed: ${error.message}`);
+      throw error;
     }
-    
-    await client.query('COMMIT');
     
     // Verify schema creation
     logger.info('Verifying schema creation...');

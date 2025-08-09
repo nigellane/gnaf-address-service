@@ -64,7 +64,7 @@ async function setupDatabase() {
     await client.query('CREATE SCHEMA IF NOT EXISTS gnaf');
     
     // Set search path to include PostGIS functions
-    await client.query('ALTER DATABASE CURRENT SET search_path TO gnaf, public, postgis');
+    await client.query('ALTER DATABASE gnaf_db SET search_path TO gnaf, public, postgis');
 
     logger.info('Database setup completed successfully');
 

@@ -135,8 +135,8 @@ CREATE INDEX idx_addresses_geometry ON gnaf.addresses USING GIST (geometry);
 -- Create spatial index on locality geometry
 CREATE INDEX idx_localities_geometry ON gnaf.localities USING GIST (geometry);
 
--- Standard indexes for common queries
-CREATE INDEX idx_addresses_postcode ON gnaf.addresses USING BTREE ((SELECT postcode FROM gnaf.localities WHERE locality_pid = addresses.locality_pid));
+-- Standard indexes for common queries  
+-- Note: Postcode index will be created after addresses are populated with a simpler approach
 CREATE INDEX idx_addresses_locality ON gnaf.addresses (locality_pid);
 CREATE INDEX idx_addresses_street ON gnaf.addresses (street_locality_pid);
 CREATE INDEX idx_addresses_gnaf_pid ON gnaf.addresses (gnaf_pid);

@@ -30,7 +30,7 @@ export interface DatabaseMetrics {
 }
 
 class DatabaseManager {
-  private pool: Pool;
+  private pool!: Pool;
   private metrics: DatabaseMetrics;
   private queryTimes: number[] = [];
   private readonly SLOW_QUERY_THRESHOLD = 1000; // 1 second

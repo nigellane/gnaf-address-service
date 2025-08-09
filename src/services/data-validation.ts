@@ -221,7 +221,7 @@ export class DataValidationService {
       [CoordinatePrecision.REGION]: 0
     };
 
-    precisionResult.rows.forEach(row => {
+    precisionResult.rows.forEach((row: any) => {
       precisionDistribution[row.coordinate_precision as CoordinatePrecision] = parseInt(row.count);
     });
 

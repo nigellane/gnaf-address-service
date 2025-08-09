@@ -18,6 +18,7 @@
     "gnaf:download": "node scripts/download-gnaf.js",
     "gnaf:import": "node scripts/import-gnaf.js",
     "gnaf:refresh": "npm run gnaf:download && npm run gnaf:import",
+    "test:system": "node scripts/test-system-simple.js",
     "docker:build": "docker build -t gnaf-address-service .",
     "docker:run": "docker run -p 3001:3001 gnaf-address-service"
   },

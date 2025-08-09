@@ -256,20 +256,16 @@ export class GNAFParser {
         address: formattedAddress,
         
         components: {
-          buildingName: record.BUILDING_NAME || undefined,
-          lotNumber: this.combineLotNumber(record),
-          flatType: record.FLAT_TYPE || undefined,
-          flatNumber: this.combineFlatNumber(record),
-          numberFirst: this.combineNumber(
-            record.NUMBER_FIRST_PREFIX, 
-            record.NUMBER_FIRST, 
-            record.NUMBER_FIRST_SUFFIX
-          ),
-          numberLast: this.combineNumber(
-            record.NUMBER_LAST_PREFIX,
-            record.NUMBER_LAST,
-            record.NUMBER_LAST_SUFFIX
-          ),
+          ...(record.BUILDING_NAME && { buildingName: record.BUILDING_NAME }),
+          ...(this.combineLotNumber(record) && { lotNumber: this.combineLotNumber(record) }),
+          ...(record.FLAT_TYPE && { flatType: record.FLAT_TYPE }),
+          ...(this.combineFlatNumber(record) && { flatNumber: this.combineFlatNumber(record) }),
+          ...(this.combineNumber(record.NUMBER_FIRST_PREFIX, record.NUMBER_FIRST, record.NUMBER_FIRST_SUFFIX) && { 
+            numberFirst: this.combineNumber(record.NUMBER_FIRST_PREFIX, record.NUMBER_FIRST, record.NUMBER_FIRST_SUFFIX) 
+          }),
+          ...(this.combineNumber(record.NUMBER_LAST_PREFIX, record.NUMBER_LAST, record.NUMBER_LAST_SUFFIX) && { 
+            numberLast: this.combineNumber(record.NUMBER_LAST_PREFIX, record.NUMBER_LAST, record.NUMBER_LAST_SUFFIX) 
+          }),
           street: {
             name: record.STREET_NAME || '',
             type: record.STREET_TYPE_CODE as any || 'ST',
@@ -294,16 +290,13 @@ export class GNAFParser {
 
         boundaries: {
           // These would be populated from additional G-NAF files
-          lga: undefined,
-          electoral: undefined,
-          statistical: undefined
         },
 
         metadata: {
           dateCreated: record.DATE_CREATED,
-          dateLastModified: record.DATE_LAST_MODIFIED || undefined,
-          dateRetired: record.DATE_RETIRED || undefined,
-          legalParcelId: record.LEGAL_PARCEL_ID || undefined,
+          ...(record.DATE_LAST_MODIFIED && { dateLastModified: record.DATE_LAST_MODIFIED }),
+          ...(record.DATE_RETIRED && { dateRetired: record.DATE_RETIRED }),
+          ...(record.LEGAL_PARCEL_ID && { legalParcelId: record.LEGAL_PARCEL_ID }),
           status: this.mapAddressStatus(record.ADDRESS_STATUS)
         }
       };
