@@ -1,0 +1,86 @@
+{
+  "name": "gnaf-address-service",
+  "version": "0.1.0",
+  "description": "Standalone microservice for Australian address validation using G-NAF dataset",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "typecheck": "tsc --noEmit",
+    "db:setup": "node scripts/setup-database.js",
+    "db:migrate": "node scripts/migrate-database.js",
+    "gnaf:download": "node scripts/download-gnaf.js",
+    "gnaf:import": "node scripts/import-gnaf.js",
+    "gnaf:refresh": "npm run gnaf:download && npm run gnaf:import",
+    "docker:build": "docker build -t gnaf-address-service .",
+    "docker:run": "docker run -p 3001:3001 gnaf-address-service"
+  },
+  "keywords": [
+    "gnaf",
+    "address-validation",
+    "geocoding",
+    "spatial",
+    "australian-addresses",
+    "microservice",
+    "real-estate"
+  ],
+  "author": "Real Estate Commission System",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "compression": "^1.7.4",
+    "pg": "^8.11.0",
+    "redis": "^4.6.0",
+    "joi": "^17.9.0",
+    "winston": "^3.10.0",
+    "node-cache": "^5.1.2",
+    "axios": "^1.5.0",
+    "csv-parse": "^5.4.0",
+    "stream-transform": "^3.2.0",
+    "dotenv": "^16.3.0",
+    "uuid": "^9.0.0",
+    "morgan": "^1.10.0",
+    "pg-copy-streams": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.4.0",
+    "@types/express": "^4.17.17",
+    "@types/cors": "^2.8.13",
+    "@types/compression": "^1.7.2",
+    "@types/pg": "^8.10.0",
+    "@types/uuid": "^9.0.0",
+    "@types/morgan": "^1.9.4",
+    "@types/jest": "^29.5.0",
+    "@types/supertest": "^2.0.12",
+    "typescript": "^5.1.0",
+    "tsx": "^3.12.0",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "supertest": "^6.3.0",
+    "eslint": "^8.44.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "nodemon": "^3.0.0",
+    "prettier": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/gnaf-address-service.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/gnaf-address-service/issues"
+  },
+  "homepage": "https://github.com/your-org/gnaf-address-service#readme"
+}
