@@ -42,7 +42,7 @@ const logger = winston.createLogger({
 class GNAFImporter {
   constructor() {
     this.dataPath = process.env.GNAF_DATASET_PATH || path.join(__dirname, '../data');
-    this.batchSize = parseInt(process.env.IMPORT_BATCH_SIZE || '5000');
+    this.batchSize = parseInt(process.env.IMPORT_BATCH_SIZE || '100');
     this.maxConcurrentBatches = parseInt(process.env.MAX_CONCURRENT_BATCHES || '3');
     this.importId = uuidv4();
     this.db = getDatabase();
@@ -343,7 +343,11 @@ class GNAFImporter {
       logger.info(`Processing addresses file: ${path.basename(csvFile)}`);
       this.stats.currentFile = csvFile;
       
-      const { processed, inserted } = await this.processAddressFile(csvFile);
+      // Load geocoding data for this state
+      const geocodingData = await this.loadGeocodingData(csvFile);
+      logger.info(`Loaded ${Object.keys(geocodingData).length} geocoding records for ${path.basename(csvFile)}`);
+      
+      const { processed, inserted } = await this.processAddressFile(csvFile, geocodingData);
       totalProcessed += processed;
       totalInserted += inserted;
     }
@@ -376,7 +380,58 @@ class GNAFImporter {
     }
   }
 
-  async processAddressFile(csvFile) {
+  async loadGeocodingData(addressFile) {
+    // Extract state from address filename (e.g., ACT_ADDRESS_DETAIL_psv.psv -> ACT)
+    const addressFileName = path.basename(addressFile);
+    const state = addressFileName.split('_')[0];
+    
+    // Find corresponding geocoding file
+    const geocodeFiles = await this.findCsvFiles('ADDRESS_DEFAULT_GEOCODE', 'geocode');
+    const stateGeocodeFile = geocodeFiles.find(file => 
+      path.basename(file).startsWith(`${state}_ADDRESS_DEFAULT_GEOCODE`)
+    );
+    
+    if (!stateGeocodeFile) {
+      logger.warn(`No geocoding file found for state ${state}`);
+      return {};
+    }
+    
+    logger.info(`Loading geocoding data from ${path.basename(stateGeocodeFile)}`);
+    
+    const geocodingData = {};
+    const delimiter = stateGeocodeFile.endsWith('.psv') ? '|' : ',';
+    
+    const parser = parse({
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+      delimiter: delimiter
+    });
+
+    const transformer = new Transform({
+      objectMode: true,
+      transform: (record, encoding, callback) => {
+        if (record.ADDRESS_DETAIL_PID && record.LATITUDE && record.LONGITUDE) {
+          geocodingData[record.ADDRESS_DETAIL_PID] = {
+            latitude: parseFloat(record.LATITUDE),
+            longitude: parseFloat(record.LONGITUDE),
+            geocodeType: record.GEOCODE_TYPE_CODE || 'UNKNOWN'
+          };
+        }
+        callback();
+      }
+    });
+
+    await pipeline(
+      createReadStream(stateGeocodeFile),
+      parser,
+      transformer
+    );
+    
+    return geocodingData;
+  }
+
+  async processAddressFile(csvFile, geocodingData = {}) {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
@@ -396,7 +451,7 @@ class GNAFImporter {
       objectMode: true,
       transform: (record, encoding, callback) => {
         try {
-          const addressData = this.transformAddressRecord(record);
+          const addressData = this.transformAddressRecord(record, geocodingData);
           
           if (addressData) {
             batch.push(addressData);
@@ -537,29 +592,61 @@ class GNAFImporter {
     `;
 
     const params = batch.flat();
+    
+    if (params.length === 0) {
+      logger.error('Empty parameters array for batch insert', { batchSize: batch.length });
+      return 0;
+    }
+    
+    if (params.length !== batch.length * 28) {
+      logger.error('Parameter count mismatch', { 
+        expected: batch.length * 28, 
+        actual: params.length,
+        batchSize: batch.length 
+      });
+      return 0;
+    }
+    
     await this.db.query(query, params);
     return batch.length;
   }
 
-  transformAddressRecord(record) {
+  transformAddressRecord(record, geocodingData = {}) {
     try {
       // Validate required fields
-      if (!record.ADDRESS_DETAIL_PID || !record.LOCALITY_PID ||
-          !record.LATITUDE || !record.LONGITUDE) {
+      if (!record.ADDRESS_DETAIL_PID || !record.LOCALITY_PID) {
         return null;
       }
 
-      const latitude = parseFloat(record.LATITUDE);
-      const longitude = parseFloat(record.LONGITUDE);
-
-      if (isNaN(latitude) || isNaN(longitude)) return null;
-      if (latitude < -45 || latitude > -10 || longitude < 110 || longitude > 155) return null;
+      // Get coordinates from geocoding data
+      const geocoding = geocodingData[record.ADDRESS_DETAIL_PID];
+      let latitude = null;
+      let longitude = null;
+      let geocodeType = 'LOCALITY';
+      
+      if (geocoding) {
+        latitude = geocoding.latitude;
+        longitude = geocoding.longitude;
+        geocodeType = geocoding.geocodeType;
+        
+        // Validate coordinates are within Australia bounds
+        if (latitude < -45 || latitude > -10 || longitude < 110 || longitude > 155) {
+          logger.warn(`Invalid coordinates for ${record.ADDRESS_DETAIL_PID}: ${latitude}, ${longitude}`);
+          return null; // Skip records with invalid coordinates
+        }
+      } else {
+        // Skip records without coordinates (database requires them)
+        if (Math.random() < 0.001) { // Log 0.1% of missing geocode cases to avoid spam
+          logger.warn(`No geocoding data for ${record.ADDRESS_DETAIL_PID}`);
+        }
+        return null;
+      }
 
       // Build formatted address
       const addressParts = [];
       
-      if (record.FLAT_TYPE && record.FLAT_NUMBER) {
-        addressParts.push(`${record.FLAT_TYPE} ${record.FLAT_NUMBER}`);
+      if (record.FLAT_TYPE_CODE && record.FLAT_NUMBER) {
+        addressParts.push(`${record.FLAT_TYPE_CODE} ${record.FLAT_NUMBER}`);
       }
       
       if (record.BUILDING_NAME) {
@@ -611,7 +698,7 @@ class GNAFImporter {
         record.GNAF_PID || record.ADDRESS_DETAIL_PID,  // gnaf_pid
         record.BUILDING_NAME || null,           // building_name
         record.LOT_NUMBER || null,              // lot_number
-        record.FLAT_TYPE || null,               // flat_type  
+        record.FLAT_TYPE_CODE || null,          // flat_type
         record.FLAT_NUMBER || null,             // flat_number
         record.NUMBER_FIRST || null,            // number_first
         record.NUMBER_LAST || null,             // number_last
@@ -621,7 +708,7 @@ class GNAFImporter {
         formattedAddress,                       // formatted_address
         latitude,                               // latitude
         longitude,                              // longitude
-        this.mapCoordinatePrecision(record.GEOCODE_TYPE), // coordinate_precision
+        this.mapCoordinatePrecision(geocodeType), // coordinate_precision
         parseInt(record.RELIABILITY) || 2,      // coordinate_reliability
         'GDA2020',                              // coordinate_crs
         confidence,                             // confidence_score
@@ -630,7 +717,7 @@ class GNAFImporter {
         record.LGA_CODE || null,                // lga_code
         record.LGA_NAME || null,                // lga_name
         record.LEGAL_PARCEL_ID || null,         // legal_parcel_id
-        record.ADDRESS_STATUS || 'CURRENT',     // address_status
+        'CURRENT',     // address_status (not in ADDRESS_DETAIL file)
         record.DATE_CREATED || new Date().toISOString().split('T')[0], // gnaf_date_created
         record.DATE_LAST_MODIFIED || null,      // gnaf_date_last_modified
         record.DATE_RETIRED || null,            // gnaf_date_retired
@@ -727,13 +814,22 @@ class GNAFImporter {
         } else if (entry.isFile()) {
           const fileName = entry.name.toLowerCase();
           if ((fileName.includes(pattern1.toLowerCase()) || fileName.includes(pattern2.toLowerCase())) &&
-              (fileName.endsWith('.csv') || fileName.endsWith('.psv')) &&
-              !fileName.includes('alias') && !fileName.includes('neighbour') && 
-              !fileName.includes('point') && !fileName.includes('authority_code') &&
-              !fileName.includes('geocode') && !fileName.includes('mesh_block') && 
-              !fileName.includes('site') && !fileName.includes('feature') &&
-              !fileName.includes('aut_psv')) {
-            results.push(fullPath);
+              (fileName.endsWith('.csv') || fileName.endsWith('.psv'))) {
+            
+            // Apply exclusions only for non-geocode patterns
+            if (pattern1.toLowerCase().includes('geocode') || pattern2.toLowerCase().includes('geocode')) {
+              // For geocode files, be more permissive
+              results.push(fullPath);
+            } else {
+              // For other files, apply standard exclusions
+              if (!fileName.includes('alias') && !fileName.includes('neighbour') && 
+                  !fileName.includes('point') && !fileName.includes('authority_code') &&
+                  !fileName.includes('geocode') && !fileName.includes('mesh_block') && 
+                  !fileName.includes('site') && !fileName.includes('feature') &&
+                  !fileName.includes('aut_psv')) {
+                results.push(fullPath);
+              }
+            }
           }
         }
       }
