@@ -33,7 +33,7 @@ class DatabaseManager {
   private pool!: Pool;
   private metrics: DatabaseMetrics;
   private queryTimes: number[] = [];
-  private readonly SLOW_QUERY_THRESHOLD = 1000; // 1 second
+  private readonly SLOW_QUERY_THRESHOLD = 5000; // 5 seconds (increased for bulk imports)
 
   constructor() {
     this.metrics = {

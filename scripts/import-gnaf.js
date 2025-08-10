@@ -43,7 +43,8 @@ class GNAFImporter {
   constructor() {
     this.dataPath = process.env.GNAF_DATASET_PATH || path.join(__dirname, '../data');
     this.batchSize = parseInt(process.env.IMPORT_BATCH_SIZE || '100');
-    this.maxConcurrentBatches = parseInt(process.env.MAX_CONCURRENT_BATCHES || '3');
+    this.maxConcurrentBatches = parseInt(process.env.MAX_CONCURRENT_BATCHES || '1'); // Reduce concurrency
+    this.batchDelay = parseInt(process.env.BATCH_DELAY_MS || '100'); // Add delay between batches
     this.importId = uuidv4();
     this.db = getDatabase();
     
@@ -449,7 +450,7 @@ class GNAFImporter {
 
     const transformer = new Transform({
       objectMode: true,
-      transform: (record, encoding, callback) => {
+      transform: async (record, encoding, callback) => {
         try {
           const addressData = this.transformAddressRecord(record, geocodingData);
           
@@ -464,22 +465,30 @@ class GNAFImporter {
           this.stats.processedRecords = processedCount;
 
           if (batch.length >= this.batchSize) {
-            this.processBatch(batch, 'addresses')
-              .then(count => {
-                insertedCount += count;
-                this.stats.insertedRecords = insertedCount;
-                
-                // Log progress every 10 seconds
-                const now = Date.now();
-                if (now - lastProgressTime > 10000) {
-                  this.logProgress('addresses', processedCount, insertedCount);
-                  lastProgressTime = now;
-                }
-              })
-              .catch(error => {
-                logger.error('Batch processing error:', error);
-                this.stats.failedRecords += batch.length;
-              });
+            // Process batch synchronously to prevent overwhelming the connection pool
+            try {
+              const count = await this.processBatch([...batch], 'addresses'); // Copy to avoid race conditions
+              insertedCount += count;
+              this.stats.insertedRecords = insertedCount;
+              
+              // Add delay between batches to prevent overwhelming the database
+              if (this.batchDelay > 0) {
+                await this.sleep(this.batchDelay);
+              }
+              
+              // Log progress every 5 seconds for more frequent updates
+              const now = Date.now();
+              if (now - lastProgressTime > 5000) {
+                this.logProgress('addresses', processedCount, insertedCount);
+                lastProgressTime = now;
+              }
+            } catch (error) {
+              logger.error('Batch processing error:', error);
+              this.stats.failedRecords += batch.length;
+              
+              // Wait briefly on error before continuing
+              await this.sleep(1000);
+            }
             
             batch = [];
           }
@@ -496,6 +505,11 @@ class GNAFImporter {
             const count = await this.processBatch(batch, 'addresses');
             insertedCount += count;
             this.stats.insertedRecords = insertedCount;
+            
+            // Add delay after final batch too
+            if (this.batchDelay > 0) {
+              await this.sleep(this.batchDelay);
+            }
           } catch (error) {
             logger.error('Final batch processing error:', error);
             this.stats.failedRecords += batch.length;
@@ -529,6 +543,13 @@ class GNAFImporter {
       }
     } catch (error) {
       logger.error(`Batch insert failed for ${tableName}:`, error);
+      
+      // Add brief recovery delay on error
+      if (error.message.includes('timeout') || error.message.includes('connect')) {
+        logger.info(`Connection issue detected, waiting 500ms before retry...`);
+        await this.sleep(500);
+      }
+      
       throw error;
     } finally {
       const duration = Date.now() - startTime;
@@ -607,8 +628,25 @@ class GNAFImporter {
       return 0;
     }
     
-    await this.db.query(query, params);
-    return batch.length;
+    // Retry logic with exponential backoff for connection issues
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        await this.db.query(query, params);
+        return batch.length;
+      } catch (error) {
+        retryCount++;
+        if (retryCount > maxRetries || !error.message.includes('timeout')) {
+          throw error;
+        }
+        
+        const backoffDelay = Math.min(500 * Math.pow(1.5, retryCount), 3000); // Cap at 3 seconds, gentler backoff
+        logger.warn(`Connection timeout, retry ${retryCount}/${maxRetries} in ${backoffDelay}ms`);
+        await this.sleep(backoffDelay);
+      }
+    }
   }
 
   transformAddressRecord(record, geocodingData = {}) {
@@ -887,19 +925,33 @@ class GNAFImporter {
   }
 
 
+  // Utility function to add delays between operations
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   logProgress(type, processed, inserted) {
     const { totalRecords, processedRecords, avgProcessingTime } = this.stats;
-    const progressPercent = totalRecords > 0 ? ((processedRecords / totalRecords) * 100).toFixed(1) : '0.0';
     const recordsPerSecond = avgProcessingTime > 0 ? Math.round(this.batchSize / (avgProcessingTime / 1000)) : 0;
     
-    let eta = 'Unknown';
-    if (totalRecords > 0 && recordsPerSecond > 0) {
-      const remainingRecords = totalRecords - processedRecords;
-      const etaSeconds = Math.round(remainingRecords / recordsPerSecond);
-      eta = this.formatDuration(etaSeconds * 1000);
-    }
+    // Calculate progress and ETA differently for addresses
+    if (type === 'addresses') {
+      const validPercent = processed > 0 ? ((inserted / processed) * 100).toFixed(1) : '0.0';
+      const currentFile = this.stats.currentFile ? path.basename(this.stats.currentFile) : 'Unknown';
+      
+      logger.info(`🏠 ADDRESSES [${currentFile}]: Processed ${processed.toLocaleString()} | ✅ Inserted ${inserted.toLocaleString()} (${validPercent}% valid) | Speed: ${recordsPerSecond}/sec`);
+    } else {
+      const progressPercent = totalRecords > 0 ? ((processedRecords / totalRecords) * 100).toFixed(1) : '0.0';
+      
+      let eta = 'Unknown';
+      if (totalRecords > 0 && recordsPerSecond > 0) {
+        const remainingRecords = totalRecords - processedRecords;
+        const etaSeconds = Math.round(remainingRecords / recordsPerSecond);
+        eta = this.formatDuration(etaSeconds * 1000);
+      }
 
-    logger.info(`${type.toUpperCase()} Progress: ${progressPercent}% (${processed.toLocaleString()}/${totalRecords.toLocaleString()}) | Inserted: ${inserted.toLocaleString()} | Speed: ${recordsPerSecond}/sec | ETA: ${eta}`);
+      logger.info(`${type.toUpperCase()} Progress: ${progressPercent}% (${processed.toLocaleString()}/${totalRecords.toLocaleString()}) | Inserted: ${inserted.toLocaleString()} | Speed: ${recordsPerSecond}/sec | ETA: ${eta}`);
+    }
   }
 
   updateProcessingTime(duration) {
