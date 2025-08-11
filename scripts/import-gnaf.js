@@ -43,8 +43,8 @@ class GNAFImporter {
   constructor() {
     this.dataPath = process.env.GNAF_DATASET_PATH || path.join(__dirname, '../data');
     this.batchSize = parseInt(process.env.IMPORT_BATCH_SIZE || '100');
-    this.maxConcurrentBatches = parseInt(process.env.MAX_CONCURRENT_BATCHES || '1'); // Reduce concurrency
-    this.batchDelay = parseInt(process.env.BATCH_DELAY_MS || '100'); // Add delay between batches
+    this.maxConcurrentBatches = parseInt(process.env.MAX_CONCURRENT_BATCHES || '1');
+    this.batchDelay = parseInt(process.env.BATCH_DELAY_MS || '500');
     this.importId = uuidv4();
     this.db = getDatabase();
     
@@ -156,7 +156,9 @@ class GNAFImporter {
   async processLocalityFile(csvFile) {
     let processedCount = 0;
     let insertedCount = 0;
+    let validationFailures = 0;
     let batch = [];
+    let pendingBatches = []; // Track all pending batch promises
 
     // Determine delimiter based on file extension
     const delimiter = csvFile.endsWith('.psv') ? '|' : ',';
@@ -172,7 +174,8 @@ class GNAFImporter {
       objectMode: true,
       transform: (record, encoding, callback) => {
         try {
-          if (this.validateLocalityRecord(record)) {
+          const validationResult = this.validateLocalityRecordWithDetails(record);
+          if (validationResult.isValid) {
             const stateCode = this.mapStatePidToAbbreviation(record.STATE_PID);
             batch.push([
               record.LOCALITY_PID,
@@ -184,19 +187,22 @@ class GNAFImporter {
               null  // longitude - not in locality file
             ]);
 
-            processedCount++;
-
             if (batch.length >= this.batchSize) {
-              this.processBatch(batch, 'localities')
-                .then(count => {
-                  insertedCount += count;
-                  this.logProgress('localities', processedCount, insertedCount);
-                })
-                .catch(error => logger.error('Batch processing error:', error));
+              const batchToProcess = [...batch]; // Copy the batch
               
+              // Add batch to pending queue instead of processing immediately
+              pendingBatches.push(batchToProcess);
               batch = [];
             }
+          } else {
+            // Log validation failure
+            validationFailures++;
+            if (validationFailures <= 10) { // Only log first 10 failures to avoid spam
+              logger.warn(`Locality record validation failed: ${validationResult.reason} | PID: ${record.LOCALITY_PID} | Name: ${record.LOCALITY_NAME} | State: ${record.STATE_PID}`);
+            }
           }
+          // Count all records as processed (valid + invalid)
+          processedCount++;
         } catch (error) {
           logger.error('Error processing locality record:', error);
         }
@@ -204,16 +210,39 @@ class GNAFImporter {
       },
       
       flush: async (callback) => {
+        // Add final batch to pending if it exists
         if (batch.length > 0) {
-          try {
-            const count = await this.processBatch(batch, 'localities');
-            insertedCount += count;
-          } catch (error) {
-            logger.error('Final batch processing error:', error);
-          }
+          pendingBatches.push([...batch]);
         }
         
-        logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records`);
+        // Process all batches in parallel but wait for completion
+        if (pendingBatches.length > 0) {
+          logger.info(`Processing ${pendingBatches.length} batches in parallel...`);
+          
+          const batchPromises = pendingBatches.map((batchToProcess, i) => {
+            return this.processBatch(batchToProcess, 'localities')
+              .then(count => {
+                logger.debug(`Batch ${i + 1}/${pendingBatches.length} completed: ${count} records`);
+                return count;
+              })
+              .catch(error => {
+                logger.error(`Batch ${i + 1} processing error:`, error.message);
+                if (batchToProcess.length > 0) {
+                  logger.error(`Failed batch sample: ${JSON.stringify(batchToProcess[0])}`);
+                }
+                return 0;
+              });
+          });
+          
+          // Wait for all batches to complete
+          const batchResults = await Promise.all(batchPromises);
+          const totalInserted = batchResults.reduce((sum, count) => sum + count, 0);
+          insertedCount = totalInserted;
+          
+          logger.info(`All ${pendingBatches.length} batches completed in parallel`);
+        }
+        
+        logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records (${validationFailures} validation failures)`);
         callback();
       }
     });
@@ -254,6 +283,7 @@ class GNAFImporter {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
+    let pendingBatches = []; // Track all pending batch promises
 
     // Determine delimiter based on file extension
     const delimiter = csvFile.endsWith('.psv') ? '|' : ',';
@@ -281,13 +311,10 @@ class GNAFImporter {
             processedCount++;
 
             if (batch.length >= this.batchSize) {
-              this.processBatch(batch, 'streets')
-                .then(count => {
-                  insertedCount += count;
-                  this.logProgress('streets', processedCount, insertedCount);
-                })
-                .catch(error => logger.error('Batch processing error:', error));
+              const batchToProcess = [...batch]; // Copy the batch
               
+              // Add batch to pending queue instead of processing immediately
+              pendingBatches.push(batchToProcess);
               batch = [];
             }
           }
@@ -298,13 +325,36 @@ class GNAFImporter {
       },
       
       flush: async (callback) => {
+        // Add final batch to pending if it exists
         if (batch.length > 0) {
-          try {
-            const count = await this.processBatch(batch, 'streets');
-            insertedCount += count;
-          } catch (error) {
-            logger.error('Final batch processing error:', error);
-          }
+          pendingBatches.push([...batch]);
+        }
+        
+        // Process all batches in parallel but wait for completion
+        if (pendingBatches.length > 0) {
+          logger.info(`Processing ${pendingBatches.length} street batches in parallel...`);
+          
+          const batchPromises = pendingBatches.map((batchToProcess, i) => {
+            return this.processBatch(batchToProcess, 'streets')
+              .then(count => {
+                logger.debug(`Street batch ${i + 1}/${pendingBatches.length} completed: ${count} records`);
+                return count;
+              })
+              .catch(error => {
+                logger.error(`Street batch ${i + 1} processing error:`, error.message);
+                if (batchToProcess.length > 0) {
+                  logger.error(`Failed street batch sample: ${JSON.stringify(batchToProcess[0])}`);
+                }
+                return 0;
+              });
+          });
+          
+          // Wait for all batches to complete
+          const batchResults = await Promise.all(batchPromises);
+          const totalInserted = batchResults.reduce((sum, count) => sum + count, 0);
+          insertedCount = totalInserted;
+          
+          logger.info(`All ${pendingBatches.length} street batches completed in parallel`);
         }
         
         logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records`);
@@ -436,6 +486,7 @@ class GNAFImporter {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
+    let pendingBatches = []; // Track all pending batch promises
     let lastProgressTime = Date.now();
 
     // Determine delimiter based on file extension
@@ -450,7 +501,7 @@ class GNAFImporter {
 
     const transformer = new Transform({
       objectMode: true,
-      transform: async (record, encoding, callback) => {
+      transform: (record, encoding, callback) => {
         try {
           const addressData = this.transformAddressRecord(record, geocodingData);
           
@@ -465,31 +516,10 @@ class GNAFImporter {
           this.stats.processedRecords = processedCount;
 
           if (batch.length >= this.batchSize) {
-            // Process batch synchronously to prevent overwhelming the connection pool
-            try {
-              const count = await this.processBatch([...batch], 'addresses'); // Copy to avoid race conditions
-              insertedCount += count;
-              this.stats.insertedRecords = insertedCount;
-              
-              // Add delay between batches to prevent overwhelming the database
-              if (this.batchDelay > 0) {
-                await this.sleep(this.batchDelay);
-              }
-              
-              // Log progress every 5 seconds for more frequent updates
-              const now = Date.now();
-              if (now - lastProgressTime > 5000) {
-                this.logProgress('addresses', processedCount, insertedCount);
-                lastProgressTime = now;
-              }
-            } catch (error) {
-              logger.error('Batch processing error:', error);
-              this.stats.failedRecords += batch.length;
-              
-              // Wait briefly on error before continuing
-              await this.sleep(1000);
-            }
+            const batchToProcess = [...batch]; // Copy the batch
             
+            // Add batch to pending queue instead of processing immediately
+            pendingBatches.push(batchToProcess);
             batch = [];
           }
         } catch (error) {
@@ -500,20 +530,59 @@ class GNAFImporter {
       },
       
       flush: async (callback) => {
+        // Add final batch to pending if it exists
         if (batch.length > 0) {
-          try {
-            const count = await this.processBatch(batch, 'addresses');
-            insertedCount += count;
-            this.stats.insertedRecords = insertedCount;
+          pendingBatches.push([...batch]);
+        }
+        
+        // Process batches in controlled chunks to avoid overwhelming database
+        if (pendingBatches.length > 0) {
+          const maxConcurrentBatches = parseInt(process.env.MAX_CONCURRENT_BATCHES || '10');
+          const totalBatches = pendingBatches.length;
+          let completedBatches = 0;
+          let totalInserted = 0;
+          
+          logger.info(`Processing ${totalBatches} address batches in chunks of ${maxConcurrentBatches}...`);
+          
+          // Process batches in chunks
+          for (let i = 0; i < pendingBatches.length; i += maxConcurrentBatches) {
+            const chunk = pendingBatches.slice(i, i + maxConcurrentBatches);
+            const chunkNumber = Math.floor(i / maxConcurrentBatches) + 1;
+            const totalChunks = Math.ceil(pendingBatches.length / maxConcurrentBatches);
             
-            // Add delay after final batch too
-            if (this.batchDelay > 0) {
+            logger.info(`Processing chunk ${chunkNumber}/${totalChunks} (${chunk.length} batches)...`);
+            
+            const chunkPromises = chunk.map((batchToProcess, chunkIndex) => {
+              const globalIndex = i + chunkIndex;
+              return this.processBatch(batchToProcess, 'addresses')
+                .then(count => {
+                  completedBatches++;
+                  return count;
+                })
+                .catch(error => {
+                  logger.error(`Batch ${globalIndex + 1} processing error:`, error.message);
+                  this.stats.failedRecords += batchToProcess.length;
+                  return 0;
+                });
+            });
+            
+            const chunkResults = await Promise.all(chunkPromises);
+            const chunkInserted = chunkResults.reduce((sum, count) => sum + count, 0);
+            totalInserted += chunkInserted;
+            
+            const progressPercent = ((completedBatches / totalBatches) * 100).toFixed(1);
+            logger.info(`Chunk ${chunkNumber}/${totalChunks} completed: ${chunkInserted} records | Progress: ${completedBatches}/${totalBatches} (${progressPercent}%)`);
+            
+            // Add delay between chunks to let database recover
+            if (this.batchDelay > 0 && i + maxConcurrentBatches < pendingBatches.length) {
               await this.sleep(this.batchDelay);
             }
-          } catch (error) {
-            logger.error('Final batch processing error:', error);
-            this.stats.failedRecords += batch.length;
           }
+          
+          insertedCount = totalInserted;
+          this.stats.insertedRecords = insertedCount;
+          
+          logger.info(`All ${totalBatches} address batches completed in chunks`);
         }
         
         logger.info(`File ${path.basename(csvFile)}: ${insertedCount}/${processedCount} records`);
@@ -571,8 +640,33 @@ class GNAFImporter {
     `;
 
     const params = batch.flat();
-    await this.db.query(query, params);
-    return batch.length;
+    
+    try {
+      await this.db.query(query, params);
+      return batch.length;
+    } catch (error) {
+      logger.error(`Locality batch insert failed: ${error.message}`);
+      logger.error(`Failed batch size: ${batch.length}`);
+      
+      // Log sample of failed records for debugging
+      if (batch.length > 0) {
+        logger.error(`Sample failed record: ${JSON.stringify(batch[0])}`);
+        logger.error(`Sample failed parameters: [${batch[0].join(', ')}]`);
+      }
+      
+      // Check for specific constraint violations
+      if (error.message.includes('foreign key')) {
+        logger.error('Foreign key constraint violation - check state_code references');
+      }
+      if (error.message.includes('check constraint')) {
+        logger.error('Check constraint violation - verify data values');
+      }
+      if (error.message.includes('not null')) {
+        logger.error('NOT NULL constraint violation - missing required field');
+      }
+      
+      throw error;
+    }
   }
 
   async insertStreetsBatch(batch) {
@@ -667,15 +761,16 @@ class GNAFImporter {
         longitude = geocoding.longitude;
         geocodeType = geocoding.geocodeType;
         
-        // Validate coordinates are within Australia bounds
-        if (latitude < -45 || latitude > -10 || longitude < 110 || longitude > 155) {
+        // Validate coordinates are within extended Australia bounds (including all territories)
+        // Expanded bounds to include Norfolk Island, Christmas Island, Cocos Islands, etc.
+        if (latitude < -55 || latitude > -5 || longitude < 95 || longitude > 170) {
           logger.warn(`Invalid coordinates for ${record.ADDRESS_DETAIL_PID}: ${latitude}, ${longitude}`);
           return null; // Skip records with invalid coordinates
         }
       } else {
         // Skip records without coordinates (database requires them)
         if (Math.random() < 0.001) { // Log 0.1% of missing geocode cases to avoid spam
-          logger.warn(`No geocoding data for ${record.ADDRESS_DETAIL_PID}`);
+          logger.debug(`No geocoding data for ${record.ADDRESS_DETAIL_PID}`);
         }
         return null;
       }
@@ -786,13 +881,40 @@ class GNAFImporter {
       '5': 'WA',   // Western Australia
       '6': 'TAS',  // Tasmania
       '7': 'NT',   // Northern Territory
-      '8': 'ACT'   // Australian Capital Territory
+      '8': 'ACT',  // Australian Capital Territory
+      '9': 'OT'    // Other Territories (Christmas Island, Norfolk Island, etc.)
     };
     return stateMap[String(statePid)] || 'NSW'; // Default to NSW if not found
   }
 
   validateLocalityRecord(record) {
     return record.LOCALITY_PID && record.LOCALITY_NAME && record.STATE_PID;
+  }
+
+  validateLocalityRecordWithDetails(record) {
+    if (!record.LOCALITY_PID) {
+      return { isValid: false, reason: 'Missing LOCALITY_PID' };
+    }
+    if (!record.LOCALITY_NAME) {
+      return { isValid: false, reason: 'Missing LOCALITY_NAME' };
+    }
+    if (!record.STATE_PID) {
+      return { isValid: false, reason: 'Missing STATE_PID' };
+    }
+    
+    // Check if state mapping exists
+    const stateCode = this.mapStatePidToAbbreviation(record.STATE_PID);
+    if (!stateCode || stateCode === 'NSW') { // 'NSW' is the fallback, so might indicate unmapped state
+      const stateMap = {
+        '1': 'NSW', '2': 'VIC', '3': 'QLD', '4': 'SA', 
+        '5': 'WA', '6': 'TAS', '7': 'NT', '8': 'ACT'
+      };
+      if (!stateMap[String(record.STATE_PID)]) {
+        return { isValid: false, reason: `Unknown STATE_PID: ${record.STATE_PID}` };
+      }
+    }
+    
+    return { isValid: true, reason: null };
   }
 
   validateStreetRecord(record) {

@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/index.ts",
+    "dev": "npm run build && node -r dotenv/config dist/index.js",
+    "dev:watch": "tsc --watch & nodemon dist/index.js",
     "start": "node dist/index.js",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -83,5 +84,19 @@
   "bugs": {
     "url": "https://github.com/your-org/gnaf-address-service/issues"
   },
-  "homepage": "https://github.com/your-org/gnaf-address-service#readme"
+  "homepage": "https://github.com/your-org/gnaf-address-service#readme",
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "setupFilesAfterEnv": ["<rootDir>/tests/setup.ts"],
+    "testMatch": ["<rootDir>/tests/**/*.test.ts"],
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/index.ts"
+    ],
+    "coverageReporters": ["text", "lcov", "html"],
+    "coverageDirectory": "coverage",
+    "testTimeout": 30000
+  }
 }

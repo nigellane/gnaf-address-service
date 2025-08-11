@@ -124,8 +124,8 @@ CREATE TABLE gnaf.addresses (
     data_quality_flags TEXT[],
     
     CONSTRAINT valid_coordinates CHECK (
-        latitude BETWEEN -45.0 AND -10.0 AND 
-        longitude BETWEEN 110.0 AND 155.0
+        latitude BETWEEN -55.0 AND -9.0 AND 
+        longitude BETWEEN 96.0 AND 169.0
     )
 );
 

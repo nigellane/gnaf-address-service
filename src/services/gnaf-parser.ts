@@ -526,8 +526,8 @@ export class GNAFParser {
  */
 class ValidationRules {
   validateCoordinates(latitude: number, longitude: number): boolean {
-    // Australian coordinate bounds
-    return latitude >= -45.0 && latitude <= -10.0 &&
+    // Australian coordinate bounds (including Torres Strait)
+    return latitude >= -45.0 && latitude <= -8.0 &&
            longitude >= 110.0 && longitude <= 155.0;
   }
 

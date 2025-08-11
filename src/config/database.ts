@@ -82,10 +82,10 @@ class DatabaseManager {
       options: `
         -c search_path=gnaf,public,postgis
         -c max_parallel_workers_per_gather=4
-        -c work_mem=256MB
-        -c maintenance_work_mem=1GB
+        -c work_mem=64MB
+        -c maintenance_work_mem=256MB
         -c random_page_cost=1.1
-        -c effective_cache_size=4GB
+        -c effective_cache_size=2GB
       `.replace(/\s+/g, ' ').trim()
     };
 
@@ -252,9 +252,9 @@ class DatabaseManager {
       this.metrics.slowQueries++;
     }
     
-    // Keep only last 1000 query times for rolling average
-    if (this.queryTimes.length > 1000) {
-      this.queryTimes = this.queryTimes.slice(-1000);
+    // Keep only last 100 query times for memory efficiency
+    if (this.queryTimes.length > 100) {
+      this.queryTimes = this.queryTimes.slice(-100);
     }
     
     this.metrics.avgQueryTime = this.queryTimes.reduce((sum, time) => sum + time, 0) / this.queryTimes.length;
@@ -310,8 +310,8 @@ class DatabaseManager {
       // Refresh materialized views
       await this.query('REFRESH MATERIALIZED VIEW gnaf.address_statistics');
       
-      // Vacuum for optimal performance
-      await this.query('VACUUM (ANALYZE) gnaf.addresses');
+      // Skip VACUUM during import - run manually later if needed
+      logger.info('Skipping VACUUM operation to prevent timeouts - run manually if needed');
       
       logger.info('Database optimization completed');
     } catch (error) {
