@@ -4,6 +4,7 @@
  */
 
 import { DatabaseManager } from '../config/database';
+import { cachingService } from './cachingService';
 import Logger from '../utils/logger';
 
 const logger = Logger.createServiceLogger('SpatialAnalytics');
@@ -21,6 +22,10 @@ export class SpatialAnalyticsService {
   private static instance: SpatialAnalyticsService;
   private spatialOptimizer: SpatialOptimizer;
   private db: DatabaseManager;
+  private readonly CACHE_TTL = {
+    PROXIMITY: 600,   // 10 minutes for proximity results
+    SPATIAL: 900      // 15 minutes for spatial analyses
+  };
 
   constructor() {
     this.spatialOptimizer = SpatialOptimizer.getInstance();
@@ -55,53 +60,69 @@ export class SpatialAnalyticsService {
       // Validate and normalize request parameters
       const normalizedRequest = this.normalizeProximityRequest(request, coordinates);
       
-      // Apply spatial optimization settings
-      await this.db.query(SpatialOptimizer.getSpatialOptimizationQuery());
-
-      // Execute proximity query with Web Mercator for accuracy
-      const proximityQuery = SpatialOptimizer.getProximityQuery(true);
-      const queryParams = [
-        coordinates.latitude,
-        coordinates.longitude,
-        normalizedRequest.radius,
-        normalizedRequest.limit
-      ];
-
-      logger.debug('Executing proximity query', { requestId, queryParams });
-
-      const results = await this.db.query(proximityQuery, queryParams);
+      // Create cache key for proximity analysis
+      const cacheKey = `spatial:proximity:${coordinates.latitude}:${coordinates.longitude}:${normalizedRequest.radius}:${normalizedRequest.limit}:${normalizedRequest.includeBearing}`;
       
-      // Calculate bearings if requested
-      const enrichedResults = normalizedRequest.includeBearing 
-        ? this.calculateBearings(results.rows, coordinates)
-        : this.formatDistanceResults(results.rows);
+      // Try to get cached result first
+      const cached = await cachingService.getOrSet(
+        cacheKey,
+        async () => {
+          // Apply spatial optimization settings
+          await this.db.query(SpatialOptimizer.getSpatialOptimizationQuery());
 
-      // Calculate summary statistics
-      const summary = this.calculateProximitySummary(enrichedResults, startTime);
-      
+          // Execute proximity query with Web Mercator for accuracy
+          const proximityQuery = SpatialOptimizer.getProximityQuery(true);
+          const queryParams = [
+            coordinates.latitude,
+            coordinates.longitude,
+            normalizedRequest.radius,
+            normalizedRequest.limit
+          ];
+
+          logger.debug('Executing proximity query', { requestId, queryParams });
+
+          const results = await this.db.query(proximityQuery, queryParams);
+          
+          // Calculate bearings if requested
+          const enrichedResults = normalizedRequest.includeBearing 
+            ? this.calculateBearings(results.rows, coordinates)
+            : this.formatDistanceResults(results.rows);
+
+          // Calculate summary statistics
+          const summary = this.calculateProximitySummary(enrichedResults, startTime);
+          
+          return {
+            center: coordinates,
+            radius: normalizedRequest.radius,
+            results: enrichedResults,
+            summary
+          };
+        },
+        { ttl: this.CACHE_TTL.PROXIMITY }
+      );
+
       // Record performance metrics
       const executionTime = Date.now() - startTime;
       this.spatialOptimizer.recordPerformance({
         queryType: 'proximity',
         executionTime,
-        resultCount: enrichedResults.length,
+        resultCount: cached?.results?.length || 0,
         usesSpatialIndex: true // Our query uses ST_DWithin with spatial index
       });
 
-      const response: ProximityResponse = {
-        center: coordinates,
-        radius: normalizedRequest.radius,
-        results: enrichedResults,
-        summary
-      };
-
       logger.info('Proximity analysis completed', { 
         requestId, 
-        resultCount: enrichedResults.length,
-        executionTime: `${executionTime}ms`
+        resultCount: cached?.results?.length || 0,
+        executionTime: `${executionTime}ms`,
+        cached: cached !== null
       });
 
-      return response;
+      return cached || {
+        center: coordinates,
+        radius: normalizedRequest.radius,
+        results: [],
+        summary: { total: 0, averageDistance: 0, searchTime: executionTime }
+      };
 
     } catch (error) {
       const executionTime = Date.now() - startTime;

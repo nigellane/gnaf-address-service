@@ -1,5 +1,6 @@
 import { getDatabase } from '../config/database';
 import { AddressValidationRequest, AddressValidationResponse, AddressSearchParams, AddressSearchResponse } from '../types/api';
+import { cachingService } from './cachingService';
 import Logger from '../utils/logger';
 
 const logger = Logger.createServiceLogger('AddressService');
@@ -20,6 +21,11 @@ const QUERY_LIMITS = {
 
 export class AddressService {
   private db = getDatabase();
+  private readonly CACHE_TTL = {
+    SEARCH: 300,      // 5 minutes for search results
+    VALIDATION: 3600, // 1 hour for validation results
+    SUGGESTIONS: 600  // 10 minutes for suggestions
+  };
 
   async searchAddresses(params: AddressSearchParams): Promise<AddressSearchResponse> {
     const startTime = Date.now();
@@ -27,67 +33,86 @@ export class AddressService {
     
     try {
       const queryLimit = Math.min(limit, QUERY_LIMITS.MAXIMUM);
-      const searchVector = this.prepareSearchQuery(q);
       
-      let baseQuery = `
-        SELECT 
-          gnaf_pid,
-          formatted_address,
-          confidence_score,
-          ${includeCoordinates ? 'latitude, longitude, coordinate_precision,' : ''}
-          ts_rank(search_vector, to_tsquery('english', $1)) as relevance_score
-        FROM gnaf.addresses 
-        WHERE search_vector @@ to_tsquery('english', $1)
-      `;
+      // Create cache key for search query
+      const cacheKey = `address:search:${q}:${limit}:${state || ''}:${postcode || ''}:${includeCoordinates}`;
       
-      const queryParams: any[] = [searchVector];
-      let paramIndex = 2;
+      // Try to get from cache first
+      const cached = await cachingService.getOrSet(
+        cacheKey,
+        async () => {
+          const searchVector = this.prepareSearchQuery(q);
+          
+          let baseQuery = `
+            SELECT 
+              gnaf_pid,
+              formatted_address,
+              confidence_score,
+              ${includeCoordinates ? 'latitude, longitude, coordinate_precision,' : ''}
+              ts_rank(search_vector, to_tsquery('english', $1)) as relevance_score
+            FROM gnaf.addresses 
+            WHERE search_vector @@ to_tsquery('english', $1)
+          `;
+          
+          const queryParams: any[] = [searchVector];
+          let paramIndex = 2;
+          
+          if (state) {
+            baseQuery += ` AND state_abbreviation = $${paramIndex}`;
+            queryParams.push(state.toUpperCase());
+            paramIndex++;
+          }
+          
+          if (postcode) {
+            baseQuery += ` AND postcode = $${paramIndex}`;
+            queryParams.push(postcode);
+            paramIndex++;
+          }
+          
+          baseQuery += ` 
+            ORDER BY relevance_score DESC, confidence_score DESC 
+            LIMIT $${paramIndex}
+          `;
+          queryParams.push(queryLimit);
+          
+          const result = await this.db.query(baseQuery, queryParams);
+          
+          const results = result.rows.map((row: any) => ({
+            gnafPid: row.gnaf_pid,
+            formattedAddress: row.formatted_address,
+            confidence: row.confidence_score,
+            ...(includeCoordinates && {
+              coordinates: {
+                latitude: parseFloat(row.latitude),
+                longitude: parseFloat(row.longitude),
+                precision: row.coordinate_precision
+              }
+            })
+          }));
+          
+          return {
+            results,
+            total: result.rows.length,
+            limit: queryLimit
+          };
+        },
+        { ttl: this.CACHE_TTL.SEARCH }
+      );
       
-      if (state) {
-        baseQuery += ` AND state_abbreviation = $${paramIndex}`;
-        queryParams.push(state.toUpperCase());
-        paramIndex++;
-      }
-      
-      if (postcode) {
-        baseQuery += ` AND postcode = $${paramIndex}`;
-        queryParams.push(postcode);
-        paramIndex++;
-      }
-      
-      baseQuery += ` 
-        ORDER BY relevance_score DESC, confidence_score DESC 
-        LIMIT $${paramIndex}
-      `;
-      queryParams.push(queryLimit);
-      
-      const result = await this.db.query(baseQuery, queryParams);
       const duration = Date.now() - startTime;
       
       logger.info('Address search completed', {
         query: q,
-        resultsCount: result.rows.length,
+        resultsCount: cached?.results?.length || 0,
         duration,
         state,
-        postcode
+        postcode,
+        cached: cached !== null
       });
       
-      const results = result.rows.map((row: any) => ({
-        gnafPid: row.gnaf_pid,
-        formattedAddress: row.formatted_address,
-        confidence: row.confidence_score,
-        ...(includeCoordinates && {
-          coordinates: {
-            latitude: parseFloat(row.latitude),
-            longitude: parseFloat(row.longitude),
-            precision: row.coordinate_precision
-          }
-        })
-      }));
-      
-      return {
-        results,
-        total: result.rows.length,
+      return cached || {
+        results: [],
+        total: 0,
         limit: queryLimit
       };
       
@@ -109,44 +134,59 @@ export class AddressService {
     try {
       const normalizedAddress = this.normalizeAddress(address);
       
-      const exactMatch = await this.findExactMatch(normalizedAddress);
-      if (exactMatch) {
-        const duration = Date.now() - startTime;
-        logger.info('Address validation - exact match found', {
-          address: address.substring(0, 100),
-          confidence: exactMatch.confidence_score,
-          duration
-        });
-        
-        return await this.buildValidationResponse(exactMatch, true, includeComponents, includeSuggestions);
-      }
+      // Create cache key for validation request
+      const cacheKey = `address:validate:${normalizedAddress}:${strictMode}:${includeComponents}:${includeSuggestions}`;
       
-      if (strictMode) {
-        return this.buildInvalidResponse(address, 'No exact match found in strict mode', includeSuggestions);
-      }
+      const cached = await cachingService.getOrSet(
+        cacheKey,
+        async () => {
+          const exactMatch = await this.findExactMatch(normalizedAddress);
+          if (exactMatch) {
+            logger.debug('Address validation - exact match found', {
+              address: address.substring(0, 100),
+              confidence: exactMatch.confidence_score
+            });
+            
+            return await this.buildValidationResponse(exactMatch, true, includeComponents, includeSuggestions);
+          }
+          
+          if (strictMode) {
+            return this.buildInvalidResponse(address, 'No exact match found in strict mode', includeSuggestions);
+          }
+          
+          const fuzzyMatches = await this.findFuzzyMatches(normalizedAddress);
+          if (fuzzyMatches.length > 0 && fuzzyMatches[0].confidence_score >= CONFIDENCE_THRESHOLDS.VALID_MATCH) {
+            const bestMatch = fuzzyMatches[0];
+            logger.debug('Address validation - fuzzy match found', {
+              address: address.substring(0, 100),
+              confidence: bestMatch.confidence_score
+            });
+            
+            return await this.buildValidationResponse(bestMatch, false, includeComponents, includeSuggestions, fuzzyMatches.slice(1));
+          }
+          
+          const suggestions = includeSuggestions ? await this.generateSuggestions(normalizedAddress) : [];
+          logger.debug('Address validation - no valid matches', {
+            address: address.substring(0, 100),
+            suggestionsCount: suggestions.length
+          });
+          
+          return this.buildInvalidResponse(address, 'No matches found with sufficient confidence', includeSuggestions, suggestions);
+        },
+        { ttl: this.CACHE_TTL.VALIDATION }
+      );
       
-      const fuzzyMatches = await this.findFuzzyMatches(normalizedAddress);
-      if (fuzzyMatches.length > 0 && fuzzyMatches[0].confidence_score >= CONFIDENCE_THRESHOLDS.VALID_MATCH) {
-        const bestMatch = fuzzyMatches[0];
-        const duration = Date.now() - startTime;
-        logger.info('Address validation - fuzzy match found', {
-          address: address.substring(0, 100),
-          confidence: bestMatch.confidence_score,
-          duration
-        });
-        
-        return await this.buildValidationResponse(bestMatch, false, includeComponents, includeSuggestions, fuzzyMatches.slice(1));
-      }
-      
-      const suggestions = includeSuggestions ? await this.generateSuggestions(normalizedAddress) : [];
       const duration = Date.now() - startTime;
-      logger.info('Address validation - no valid matches', {
+      
+      logger.info('Address validation completed', {
         address: address.substring(0, 100),
-        suggestionsCount: suggestions.length,
-        duration
+        isValid: cached?.isValid || false,
+        confidence: cached?.confidence || 0,
+        duration,
+        cached: cached !== null
       });
       
-      return this.buildInvalidResponse(address, 'No matches found with sufficient confidence', includeSuggestions, suggestions);
+      return cached || this.buildInvalidResponse(address, 'Cache error', includeSuggestions);
       
     } catch (error) {
       const duration = Date.now() - startTime;
