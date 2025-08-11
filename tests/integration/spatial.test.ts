@@ -38,7 +38,7 @@ describe('Spatial Integration Tests', () => {
       
       const result = await getDatabase().query(extensionQuery);
       expect(result.rows.length).toBeGreaterThan(0);
-      expect(result.rows.some(row => row.extname === 'postgis')).toBe(true);
+      expect(result.rows.some((row: any) => row.extname === 'postgis')).toBe(true);
     });
 
     it('should verify spatial indexes exist on addresses table', async () => {

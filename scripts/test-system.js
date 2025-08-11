@@ -96,7 +96,7 @@ async function testDatabaseConnection() {
 }
 
 async function testSchemaExists() {
-  const { getDatabase } = require('../src/config/database');
+  const { getDatabase } = require('../dist/config/database');
   const db = getDatabase();
   
   // Check if gnaf schema exists
@@ -128,7 +128,7 @@ async function testSchemaExists() {
 }
 
 async function testPostGIS() {
-  const { getDatabase } = require('../src/config/database');
+  const { getDatabase } = require('../dist/config/database');
   const db = getDatabase();
   
   // Test PostGIS version
@@ -150,7 +150,7 @@ async function testPostGIS() {
 }
 
 async function testIndexes() {
-  const { getDatabase } = require('../src/config/database');
+  const { getDatabase } = require('../dist/config/database');
   const db = getDatabase();
   
   // Check for spatial indexes
@@ -184,7 +184,7 @@ async function testIndexes() {
 async function testMonitoring() {
   // Test monitoring service
   try {
-    const MonitoringService = require('../src/services/monitoring').default;
+    const MonitoringService = require('../dist/services/monitoring').default;
     const monitoring = new MonitoringService();
     
     const health = await monitoring.checkSystemHealth();
