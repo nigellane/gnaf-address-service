@@ -210,6 +210,7 @@ export const validateBoundaryRequest = (req: Request, res: Response, next: NextF
             requestId
           }
         });
+        return;
       }
     }
 
@@ -226,6 +227,7 @@ export const validateBoundaryRequest = (req: Request, res: Response, next: NextF
         requestId
       }
     });
+    return;
   }
 };
 
@@ -263,6 +265,7 @@ export const validateStatisticalAreaRequest = (req: Request, res: Response, next
             requestId
           }
         });
+        return;
       }
 
       if (!SpatialOptimizer.validateAustralianCoordinates(latitude, longitude)) {
@@ -273,6 +276,7 @@ export const validateStatisticalAreaRequest = (req: Request, res: Response, next
             requestId
           }
         });
+        return;
       }
     }
 
@@ -313,6 +317,7 @@ export const validateStatisticalAreaRequest = (req: Request, res: Response, next
         requestId
       }
     });
+    return;
   }
 };
 
@@ -361,6 +366,7 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
             requestId
           }
         });
+        return;
       }
 
       if (!['proximity', 'boundary', 'statistical'].includes(operation.type)) {
@@ -371,6 +377,7 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
             requestId
           }
         });
+        return;
       }
 
       if (!operation.parameters || typeof operation.parameters !== 'object') {
@@ -381,6 +388,7 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
             requestId
           }
         });
+        return;
       }
     }
 
@@ -394,6 +402,7 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
             requestId
           }
         });
+        return;
       }
 
       if (options.progressCallback !== undefined && typeof options.progressCallback !== 'boolean') {
@@ -404,6 +413,7 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
             requestId
           }
         });
+        return;
       }
 
       if (options.failFast !== undefined && typeof options.failFast !== 'boolean') {
@@ -414,6 +424,7 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
             requestId
           }
         });
+        return;
       }
     }
 
@@ -430,5 +441,6 @@ export const validateBatchSpatialRequest = (req: Request, res: Response, next: N
         requestId
       }
     });
+    return;
   }
 };
