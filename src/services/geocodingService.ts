@@ -355,3 +355,6 @@ export class GeocodingService {
   }
 }
 
+// Export singleton instance
+export const geocodingService = new GeocodingService();
+

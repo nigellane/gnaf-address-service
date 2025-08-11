@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import addressRoutes from './routes/addresses';
+import spatialRoutes from './routes/spatial';
 import { ApiError } from './types/api';
 import Logger from './utils/logger';
 
@@ -65,6 +66,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/api/v1/addresses', addressRoutes);
+app.use('/api/v1/spatial', spatialRoutes);
 
 app.get('/api/v1/health', (req, res) => {
   res.json({

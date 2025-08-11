@@ -29,7 +29,8 @@ export interface DatabaseMetrics {
   slowQueries: number;
 }
 
-class DatabaseManager {
+export class DatabaseManager {
+  private static instance: DatabaseManager;
   private pool!: Pool;
   private metrics: DatabaseMetrics;
   private queryTimes: number[] = [];
@@ -326,6 +327,16 @@ class DatabaseManager {
   async close(): Promise<void> {
     await this.pool.end();
     logger.info('Database connection pool closed');
+  }
+
+  /**
+   * Get singleton instance
+   */
+  static getInstance(): DatabaseManager {
+    if (!this.instance) {
+      this.instance = new DatabaseManager();
+    }
+    return this.instance;
   }
 }
 
