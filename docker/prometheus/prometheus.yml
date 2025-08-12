@@ -9,11 +9,11 @@ scrape_configs:
 
   - job_name: 'gnaf-address-service'
     static_configs:
-      - targets: ['host.docker.internal:3000']  # Your dev server
-    metrics_path: '/api/v1/health/metrics'
+      - targets: ['10.76.2.71:3001']  # Your dev server (Linux host IP)
+    metrics_path: '/metrics'
     scrape_interval: 10s
     scrape_timeout: 5s
 
   - job_name: 'node-exporter'
     static_configs:
-      - targets: ['host.docker.internal:9100']  # Optional: if you want system metrics
+      - targets: ['10.76.2.71:9100']  # Optional: if you want system metrics
