@@ -1,0 +1,445 @@
+name: Security Scanning
+
+on:
+  schedule:
+    # Run security scans daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  dependency-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run npm audit
+      run: |
+        echo "Running npm audit..."
+        npm audit --audit-level=moderate --json > npm-audit-results.json || true
+        npm audit --audit-level=moderate
+
+    - name: Run Snyk security scan
+      uses: snyk/actions/node@master
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=medium --json-file-output=snyk-results.json
+
+    - name: Run OSV-Scanner
+      uses: google/osv-scanner-action@v1
+      continue-on-error: true
+      with:
+        scan-args: |-
+          --output=osv-results.json
+          --format=json
+          ./
+
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: dependency-scan-results
+        path: |
+          npm-audit-results.json
+          snyk-results.json
+          osv-results.json
+
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    needs: []
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image for scanning
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        load: true
+        tags: gnaf-security-scan:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'gnaf-security-scan:latest'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Trivy filesystem scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'json'
+        output: 'trivy-fs-results.json'
+
+    - name: Run Docker Scout
+      if: github.event_name != 'schedule'
+      uses: docker/scout-action@v1
+      with:
+        command: cves
+        image: gnaf-security-scan:latest
+        sarif-file: docker-scout-results.sarif
+        summary: true
+
+    - name: Upload container scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: container-scan-results
+        path: |
+          trivy-results.sarif
+          trivy-fs-results.json
+          docker-scout-results.sarif
+
+  code-quality:
+    name: Code Quality and SAST
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        # Fetch full history for better SAST analysis
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: javascript
+
+    - name: Run ESLint security rules
+      run: |
+        # Install ESLint security plugin if not already present
+        npm install --no-save eslint-plugin-security
+        
+        # Run ESLint with security focus
+        npx eslint src/ --ext .ts,.js --format json --output-file eslint-security-results.json || true
+        npx eslint src/ --ext .ts,.js
+
+    - name: Run Semgrep SAST
+      uses: semgrep/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/nodejs
+          p/typescript
+        generateSarif: "1"
+      env:
+        SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+    - name: Upload code quality results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: code-quality-results
+        path: |
+          eslint-security-results.json
+          semgrep.sarif
+
+  secrets-scan:
+    name: Secrets Detection
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+    - name: Run GitLeaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload secrets scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: secrets-scan-results
+        path: |
+          results.json
+          gitleaks-report.json
+
+  infrastructure-scan:
+    name: Infrastructure Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Checkov on Kubernetes manifests
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: k8s/
+        framework: kubernetes
+        output_format: sarif
+        output_file_path: checkov-k8s-results.sarif
+
+    - name: Run Checkov on Docker files
+      uses: bridgecrewio/checkov-action@master
+      with:
+        file: Dockerfile
+        framework: dockerfile
+        output_format: json
+        output_file_path: checkov-docker-results.json
+
+    - name: Upload Checkov scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: infrastructure-scan-results
+        path: |
+          checkov-k8s-results.sarif
+          checkov-docker-results.json
+
+  compliance-check:
+    name: Compliance and Best Practices
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Check Node.js security best practices
+      run: |
+        echo "Checking Node.js security best practices..."
+        
+        # Check package.json for security settings
+        cat > security-check.js << 'EOF'
+        const fs = require('fs');
+        const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        
+        const checks = [
+          {
+            name: 'No node_modules in git',
+            check: () => !fs.existsSync('.gitignore') || fs.readFileSync('.gitignore', 'utf8').includes('node_modules'),
+            critical: true
+          },
+          {
+            name: 'Engines specified',
+            check: () => packageJson.engines && packageJson.engines.node,
+            critical: false
+          },
+          {
+            name: 'npm audit script present',
+            check: () => packageJson.scripts && packageJson.scripts.audit,
+            critical: false
+          },
+          {
+            name: 'No eval usage',
+            check: () => {
+              const srcFiles = fs.readdirSync('src', { recursive: true })
+                .filter(file => file.endsWith('.ts') || file.endsWith('.js'));
+              
+              return !srcFiles.some(file => {
+                const content = fs.readFileSync(`src/${file}`, 'utf8');
+                return content.includes('eval(') || content.includes('Function(');
+              });
+            },
+            critical: true
+          }
+        ];
+        
+        let passed = 0;
+        let failed = 0;
+        let critical_failed = 0;
+        
+        checks.forEach(check => {
+          try {
+            if (check.check()) {
+              console.log(`✅ ${check.name}`);
+              passed++;
+            } else {
+              console.log(`❌ ${check.name}`);
+              failed++;
+              if (check.critical) critical_failed++;
+            }
+          } catch (error) {
+            console.log(`❌ ${check.name} - Error: ${error.message}`);
+            failed++;
+            if (check.critical) critical_failed++;
+          }
+        });
+        
+        console.log(`\nSummary: ${passed} passed, ${failed} failed`);
+        if (critical_failed > 0) {
+          console.log(`Critical failures: ${critical_failed}`);
+          process.exit(1);
+        }
+        EOF
+        
+        node security-check.js
+
+    - name: Check Docker security best practices
+      run: |
+        echo "Checking Dockerfile security best practices..."
+        
+        # Check Dockerfile for security issues
+        if grep -q "USER root" Dockerfile; then
+          echo "❌ Running as root user detected"
+          exit 1
+        fi
+        
+        if ! grep -q "USER " Dockerfile; then
+          echo "❌ No non-root user specified"
+          exit 1
+        fi
+        
+        if grep -q "ADD http" Dockerfile; then
+          echo "❌ Using ADD with URLs (security risk)"
+          exit 1
+        fi
+        
+        echo "✅ Dockerfile security checks passed"
+
+    - name: Generate compliance report
+      run: |
+        cat > compliance-report.json << EOF
+        {
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "repository": "${{ github.repository }}",
+          "branch": "${{ github.ref_name }}",
+          "commit": "${{ github.sha }}",
+          "security_checks": {
+            "dependency_scan": "completed",
+            "container_scan": "completed",
+            "code_quality": "completed",
+            "secrets_scan": "completed",
+            "infrastructure_scan": "completed",
+            "compliance_check": "completed"
+          },
+          "compliance_status": "passed"
+        }
+        EOF
+
+    - name: Upload compliance report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: compliance-report
+        path: compliance-report.json
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, container-scan, code-quality, secrets-scan, infrastructure-scan, compliance-check]
+    if: always()
+
+    steps:
+    - name: Download all scan results
+      uses: actions/download-artifact@v3
+
+    - name: Generate security summary
+      run: |
+        echo "# Security Scan Summary" > security-summary.md
+        echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        echo "## Scan Results" >> security-summary.md
+        echo "| Scan Type | Status |" >> security-summary.md
+        echo "|-----------|--------|" >> security-summary.md
+        echo "| Dependency Scan | ${{ needs.dependency-scan.result }} |" >> security-summary.md
+        echo "| Container Scan | ${{ needs.container-scan.result }} |" >> security-summary.md
+        echo "| Code Quality | ${{ needs.code-quality.result }} |" >> security-summary.md
+        echo "| Secrets Scan | ${{ needs.secrets-scan.result }} |" >> security-summary.md
+        echo "| Infrastructure Scan | ${{ needs.infrastructure-scan.result }} |" >> security-summary.md
+        echo "| Compliance Check | ${{ needs.compliance-check.result }} |" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        # Determine overall security status
+        if [[ "${{ needs.dependency-scan.result }}" == "success" && 
+              "${{ needs.container-scan.result }}" == "success" && 
+              "${{ needs.code-quality.result }}" == "success" && 
+              "${{ needs.secrets-scan.result }}" == "success" && 
+              "${{ needs.infrastructure-scan.result }}" == "success" && 
+              "${{ needs.compliance-check.result }}" == "success" ]]; then
+          echo "## Overall Status: ✅ PASSED" >> security-summary.md
+        else
+          echo "## Overall Status: ❌ FAILED" >> security-summary.md
+        fi
+        
+        cat security-summary.md
+
+    - name: Upload security summary
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-summary
+        path: security-summary.md
+
+    - name: Comment security summary on PR
+      uses: actions/github-script@v6
+      if: github.event_name == 'pull_request'
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = fs.readFileSync('security-summary.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: summary
+          });

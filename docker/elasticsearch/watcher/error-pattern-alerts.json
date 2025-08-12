@@ -1,0 +1,72 @@
+{
+  "trigger": {
+    "schedule": {
+      "interval": "1m"
+    }
+  },
+  "input": {
+    "search": {
+      "request": {
+        "search_type": "query_then_fetch",
+        "indices": ["gnaf-logs-*"],
+        "types": [],
+        "body": {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "term": {
+                    "level": "error"
+                  }
+                },
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-5m"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "error_types": {
+              "terms": {
+                "field": "errorName.keyword",
+                "size": 10
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "condition": {
+    "compare": {
+      "ctx.payload.hits.total.value": {
+        "gt": 5
+      }
+    }
+  },
+  "actions": {
+    "log_alert": {
+      "logging": {
+        "text": "High error rate detected: {{ctx.payload.hits.total.value}} errors in the last 5 minutes. Top error types: {{#ctx.payload.aggregations.error_types.buckets}}{{key}} ({{doc_count}}) {{/ctx.payload.aggregations.error_types.buckets}}"
+      }
+    },
+    "webhook_notification": {
+      "webhook": {
+        "scheme": "https",
+        "host": "hooks.slack.com",
+        "port": 443,
+        "method": "post",
+        "path": "/services/YOUR_WEBHOOK_PATH_HERE",
+        "params": {},
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"text\": \"🚨 G-NAF Service Alert: High error rate detected - {{ctx.payload.hits.total.value}} errors in 5 minutes\", \"channel\": \"#gnaf-alerts\"}"
+      }
+    }
+  }
+}

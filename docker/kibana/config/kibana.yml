@@ -1,0 +1,29 @@
+server.host: "0.0.0.0"
+server.publicBaseUrl: "http://localhost:5601"
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+
+# Monitoring
+monitoring.ui.container.elasticsearch.enabled: true
+
+# Security (disabled for development)
+xpack.security.enabled: false
+xpack.encryptedSavedObjects.encryptionKey: "something_at_least_32_characters"
+
+# Logging
+logging.appenders:
+  file:
+    type: file
+    fileName: /usr/share/kibana/logs/kibana.log
+    layout:
+      type: json
+
+logging.root:
+  level: info
+  appenders:
+    - default
+    - file
+
+# Dashboard and visualization settings
+xpack.canvas.enabled: true
+xpack.infra.enabled: true
+xpack.apm.enabled: false

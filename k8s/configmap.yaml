@@ -1,0 +1,121 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gnaf-config
+  namespace: gnaf-system
+  labels:
+    app: gnaf-address-service
+    component: configuration
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  LOG_TO_FILE: "true"
+  
+  # Database configuration
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "gnaf_db"
+  
+  # Redis configuration
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  
+  # Performance settings
+  CACHE_TTL: "3600"
+  CACHE_MAX_KEYS: "100000"
+  ENABLE_L1_CACHE: "true"
+  ENABLE_L2_CACHE: "true"
+  ENABLE_L3_CACHE: "true"
+  
+  # Rate limiting
+  RATE_LIMIT_WINDOW_MS: "900000"
+  RATE_LIMIT_MAX_REQUESTS: "100"
+  
+  # Monitoring
+  PROMETHEUS_ENABLED: "true"
+  HEALTH_CHECK_ENABLED: "true"
+  METRICS_PATH: "/metrics"
+  
+  # Performance
+  MAX_CONCURRENT_REQUESTS: "1000"
+  REQUEST_TIMEOUT_MS: "30000"
+  DB_CONNECTION_POOL_SIZE: "20"
+  SLOW_QUERY_THRESHOLD_MS: "1000"
+  
+  # Logging
+  ENABLE_REQUEST_LOGGING: "true"
+  ENABLE_PERFORMANCE_LOGGING: "true"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: gnaf-system
+  labels:
+    app: postgres
+    component: configuration
+data:
+  POSTGRES_DB: "gnaf_db"
+  POSTGRES_USER: "gnaf_user"
+  POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+  
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: gnaf-system
+  labels:
+    app: redis
+    component: configuration
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    port 6379
+    protected-mode yes
+    timeout 300
+    maxmemory 512mb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 5
+    save 900 1
+    save 300 10
+    save 60 10000
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+    loglevel notice
+    logfile ""
+    syslog-enabled no
+    tcp-keepalive 300
+    tcp-backlog 511
+    databases 16
+    lazy-expire-disabled no
+    lazy-free-lazy-eviction yes
+    lazy-free-lazy-expire yes
+    lazy-free-lazy-server-del yes
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    aof-load-truncated yes
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+    hash-max-ziplist-entries 512
+    hash-max-ziplist-value 64
+    list-max-ziplist-size -2
+    list-compress-depth 0
+    set-max-intset-entries 512
+    zset-max-ziplist-entries 128
+    zset-max-ziplist-value 64
+    hll-sparse-max-bytes 3000
+    stream-node-max-bytes 4096
+    stream-node-max-entries 100
+    activerehashing yes
+    client-query-buffer-limit 1gb
+    proto-max-bulk-len 512mb

@@ -1,0 +1,83 @@
+{
+  "trigger": {
+    "schedule": {
+      "interval": "2m"
+    }
+  },
+  "input": {
+    "search": {
+      "request": {
+        "search_type": "query_then_fetch",
+        "indices": ["gnaf-logs-*"],
+        "types": [],
+        "body": {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "term": {
+                    "slowQueryLog": true
+                  }
+                },
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-10m"
+                    }
+                  }
+                },
+                {
+                  "range": {
+                    "duration": {
+                      "gte": 1000
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "avg_duration": {
+              "avg": {
+                "field": "duration"
+              }
+            },
+            "max_duration": {
+              "max": {
+                "field": "duration"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "condition": {
+    "compare": {
+      "ctx.payload.hits.total.value": {
+        "gt": 3
+      }
+    }
+  },
+  "actions": {
+    "log_alert": {
+      "logging": {
+        "text": "Slow query pattern detected: {{ctx.payload.hits.total.value}} slow queries in 10 minutes. Average duration: {{ctx.payload.aggregations.avg_duration.value}}ms, Max: {{ctx.payload.aggregations.max_duration.value}}ms"
+      }
+    },
+    "webhook_notification": {
+      "webhook": {
+        "scheme": "https",
+        "host": "hooks.slack.com", 
+        "port": 443,
+        "method": "post",
+        "path": "/services/YOUR_WEBHOOK_PATH_HERE",
+        "params": {},
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"text\": \"⚠️ G-NAF Service: Slow query pattern detected - {{ctx.payload.hits.total.value}} queries >1s in 10 minutes\", \"channel\": \"#gnaf-performance\"}"
+      }
+    }
+  }
+}

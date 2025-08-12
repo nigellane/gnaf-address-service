@@ -1,0 +1,173 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gnaf-ingress
+  namespace: gnaf-system
+  labels:
+    app: gnaf-address-service
+    component: ingress
+  annotations:
+    # Nginx ingress annotations
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    
+    # Rate limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    
+    # CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://yourdomain.com,https://www.yourdomain.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization,X-Correlation-ID"
+    
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: SAMEORIGIN";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "Referrer-Policy: no-referrer-when-downgrade";
+      more_set_headers "Content-Security-Policy: default-src 'self' http: https: data: blob: 'unsafe-inline'";
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains";
+    
+    # Health check exclusion from rate limiting
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location ~ ^/api/v1/health {
+        limit_req off;
+        access_log off;
+      }
+    
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    
+    # Buffer sizes
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "4k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    
+    # Certificate management (uncomment for Let's Encrypt)
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # cert-manager.io/acme-challenge-type: http01
+
+spec:
+  # TLS configuration (uncomment for HTTPS)
+  # tls:
+  # - hosts:
+  #   - api.yourdomain.com
+  #   secretName: gnaf-tls-secret
+  
+  rules:
+  - host: api.yourdomain.com  # Replace with your domain
+    http:
+      paths:
+      # Health checks (high priority, no rate limiting)
+      - path: /api/v1/health
+        pathType: Prefix
+        backend:
+          service:
+            name: gnaf-app-service
+            port:
+              number: 80
+      
+      # Metrics endpoint (restricted access in nginx config)
+      - path: /metrics
+        pathType: Exact
+        backend:
+          service:
+            name: gnaf-app-service
+            port:
+              number: 80
+      
+      # Main API endpoints
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: gnaf-app-service
+            port:
+              number: 80
+      
+      # Default catch-all
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: gnaf-app-service
+            port:
+              number: 80
+
+---
+# Network policy for ingress security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gnaf-ingress-policy
+  namespace: gnaf-system
+  labels:
+    app: gnaf-address-service
+    component: network-security
+spec:
+  podSelector:
+    matchLabels:
+      app: gnaf-address-service
+      component: application
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from nginx ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 3000
+  # Allow ingress from monitoring namespace (Prometheus)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: gnaf-monitoring
+    ports:
+    - protocol: TCP
+      port: 3000
+  # Allow ingress from same namespace (inter-service communication)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: gnaf-system
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  # Allow egress to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow egress to Redis
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow HTTPS to external services (geocoding APIs, etc.)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443

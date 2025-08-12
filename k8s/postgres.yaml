@@ -1,0 +1,254 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: gnaf-system
+  labels:
+    app: postgres
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: gnaf-system
+  labels:
+    app: postgres
+    component: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        component: database
+    spec:
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+      containers:
+      - name: postgres
+        image: postgis/postgis:15-3.3
+        ports:
+        - containerPort: 5432
+          protocol: TCP
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_INITDB_ARGS
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_INITDB_ARGS
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - gnaf_user
+            - -d
+            - gnaf_db
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - gnaf_user
+            - -d
+            - gnaf_db
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: init-scripts
+        configMap:
+          name: postgres-init-scripts
+          defaultMode: 0755
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: gnaf-system
+  labels:
+    app: postgres
+    component: database
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+  selector:
+    app: postgres
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: gnaf-system
+  labels:
+    app: postgres
+    component: init
+data:
+  01-init.sql: |
+    -- G-NAF Database Initialization Script
+    
+    -- Create extensions
+    CREATE EXTENSION IF NOT EXISTS postgis;
+    CREATE EXTENSION IF NOT EXISTS postgis_topology;
+    CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
+    CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
+    
+    -- Create schema for G-NAF data
+    CREATE SCHEMA IF NOT EXISTS gnaf;
+    
+    -- Set search path
+    SET search_path TO gnaf, public;
+    
+    -- Create basic tables (simplified for demo)
+    CREATE TABLE IF NOT EXISTS addresses (
+        address_id SERIAL PRIMARY KEY,
+        address_detail_pid VARCHAR(15) UNIQUE NOT NULL,
+        address_site_pid VARCHAR(15),
+        level_geocoded_code SMALLINT,
+        property_pid VARCHAR(15),
+        gnaf_property_pid VARCHAR(15),
+        primary_secondary VARCHAR(1),
+        building_name VARCHAR(45),
+        lot_number_prefix VARCHAR(2),
+        lot_number VARCHAR(5),
+        lot_number_suffix VARCHAR(2),
+        flat_type_code VARCHAR(7),
+        flat_number_prefix VARCHAR(2),
+        flat_number SMALLINT,
+        flat_number_suffix VARCHAR(2),
+        level_type_code VARCHAR(4),
+        level_number_prefix VARCHAR(2),
+        level_number SMALLINT,
+        level_number_suffix VARCHAR(2),
+        number_first_prefix VARCHAR(3),
+        number_first SMALLINT,
+        number_first_suffix VARCHAR(2),
+        number_last_prefix VARCHAR(3),
+        number_last SMALLINT,
+        number_last_suffix VARCHAR(2),
+        street_locality_pid VARCHAR(15),
+        location_description TEXT,
+        locality_pid VARCHAR(15),
+        alias_principal VARCHAR(1),
+        postcode VARCHAR(4),
+        private_street VARCHAR(75),
+        legal_parcel_id VARCHAR(20),
+        confidence SMALLINT,
+        alias_principal_2 VARCHAR(1),
+        geocoded_level_name VARCHAR(50),
+        geometry GEOMETRY(POINT, 4326),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    -- Create indexes
+    CREATE INDEX IF NOT EXISTS idx_addresses_geometry ON addresses USING GIST (geometry);
+    CREATE INDEX IF NOT EXISTS idx_addresses_postcode ON addresses (postcode);
+    CREATE INDEX IF NOT EXISTS idx_addresses_locality ON addresses (locality_pid);
+    CREATE INDEX IF NOT EXISTS idx_addresses_street_locality ON addresses (street_locality_pid);
+    CREATE INDEX IF NOT EXISTS idx_addresses_detail_pid ON addresses (address_detail_pid);
+    
+    -- Create localities table
+    CREATE TABLE IF NOT EXISTS localities (
+        locality_id SERIAL PRIMARY KEY,
+        locality_pid VARCHAR(15) UNIQUE NOT NULL,
+        locality_name VARCHAR(100) NOT NULL,
+        primary_postcode VARCHAR(4),
+        locality_class_code VARCHAR(1),
+        state_pid VARCHAR(15),
+        gnaf_locality_pid VARCHAR(15),
+        gnaf_reliability_code SMALLINT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_localities_name ON localities (locality_name);
+    CREATE INDEX IF NOT EXISTS idx_localities_postcode ON localities (primary_postcode);
+    CREATE INDEX IF NOT EXISTS idx_localities_state ON localities (state_pid);
+    
+    -- Create states table
+    CREATE TABLE IF NOT EXISTS states (
+        state_id SERIAL PRIMARY KEY,
+        state_pid VARCHAR(15) UNIQUE NOT NULL,
+        state_name VARCHAR(50) NOT NULL,
+        state_abbreviation VARCHAR(3) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    -- Insert sample states
+    INSERT INTO states (state_pid, state_name, state_abbreviation) VALUES
+    ('STATE_001', 'New South Wales', 'NSW'),
+    ('STATE_002', 'Victoria', 'VIC'),
+    ('STATE_003', 'Queensland', 'QLD'),
+    ('STATE_004', 'South Australia', 'SA'),
+    ('STATE_005', 'Western Australia', 'WA'),
+    ('STATE_006', 'Tasmania', 'TAS'),
+    ('STATE_007', 'Northern Territory', 'NT'),
+    ('STATE_008', 'Australian Capital Territory', 'ACT')
+    ON CONFLICT (state_pid) DO NOTHING;
+    
+    -- Grant permissions
+    GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA gnaf TO gnaf_user;
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA gnaf TO gnaf_user;
+    GRANT USAGE ON SCHEMA gnaf TO gnaf_user;

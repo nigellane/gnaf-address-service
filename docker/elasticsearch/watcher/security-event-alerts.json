@@ -1,0 +1,78 @@
+{
+  "trigger": {
+    "schedule": {
+      "interval": "30s"
+    }
+  },
+  "input": {
+    "search": {
+      "request": {
+        "search_type": "query_then_fetch",
+        "indices": ["gnaf-logs-*"],
+        "types": [],
+        "body": {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "term": {
+                    "securityLog": true
+                  }
+                },
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-2m"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "security_events": {
+              "terms": {
+                "field": "securityEvent.keyword",
+                "size": 10
+              }
+            },
+            "source_ips": {
+              "terms": {
+                "field": "ip.keyword",
+                "size": 10
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "condition": {
+    "compare": {
+      "ctx.payload.hits.total.value": {
+        "gt": 0
+      }
+    }
+  },
+  "actions": {
+    "immediate_alert": {
+      "logging": {
+        "text": "🔒 SECURITY ALERT: {{ctx.payload.hits.total.value}} security events in 2 minutes. Events: {{#ctx.payload.aggregations.security_events.buckets}}{{key}} ({{doc_count}}) {{/ctx.payload.aggregations.security_events.buckets}}. Source IPs: {{#ctx.payload.aggregations.source_ips.buckets}}{{key}} {{/ctx.payload.aggregations.source_ips.buckets}}"
+      }
+    },
+    "critical_webhook": {
+      "webhook": {
+        "scheme": "https",
+        "host": "hooks.slack.com",
+        "port": 443,
+        "method": "post",
+        "path": "/services/YOUR_WEBHOOK_PATH_HERE",
+        "params": {},
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"text\": \"🔒 CRITICAL: G-NAF Security Event - {{ctx.payload.hits.total.value}} events detected\", \"channel\": \"#security-alerts\"}"
+      }
+    }
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "trigger": {
+    "schedule": {
+      "interval": "5m"
+    }
+  },
+  "input": {
+    "search": {
+      "request": {
+        "search_type": "query_then_fetch",
+        "indices": ["gnaf-logs-*"],
+        "types": [],
+        "body": {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-15m"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "request_volume": {
+              "date_histogram": {
+                "field": "@timestamp",
+                "interval": "5m"
+              }
+            },
+            "error_rate": {
+              "filters": {
+                "filters": {
+                  "errors": {
+                    "term": {
+                      "level": "error"
+                    }
+                  },
+                  "total": {
+                    "match_all": {}
+                  }
+                }
+              }
+            },
+            "unique_ips": {
+              "cardinality": {
+                "field": "ip.keyword"
+              }
+            },
+            "endpoints": {
+              "terms": {
+                "field": "endpoint.keyword",
+                "size": 10
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "condition": {
+    "script": {
+      "source": "def buckets = ctx.payload.aggregations.request_volume.buckets; if (buckets.size() < 2) return false; def latest = buckets[-1].doc_count; def previous = buckets[-2].doc_count; def spike_threshold = previous * 3; def drop_threshold = previous * 0.3; return latest > spike_threshold || (previous > 10 && latest < drop_threshold);"
+    }
+  },
+  "actions": {
+    "anomaly_alert": {
+      "logging": {
+        "text": "Anomalous traffic pattern detected. Request volume analysis: {{#ctx.payload.aggregations.request_volume.buckets}}{{key_as_string}}: {{doc_count}} requests {{/ctx.payload.aggregations.request_volume.buckets}}. Unique IPs: {{ctx.payload.aggregations.unique_ips.value}}"
+      }
+    },
+    "traffic_webhook": {
+      "webhook": {
+        "scheme": "https",
+        "host": "hooks.slack.com",
+        "port": 443,
+        "method": "post",
+        "path": "/services/YOUR_WEBHOOK_PATH_HERE", 
+        "params": {},
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"text\": \"📊 G-NAF Traffic Anomaly: Unusual traffic pattern detected in request volume\", \"channel\": \"#gnaf-monitoring\"}"
+      }
+    }
+  }
+}
