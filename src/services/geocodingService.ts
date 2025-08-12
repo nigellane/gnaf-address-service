@@ -67,7 +67,7 @@ export class GeocodingService {
                  CASE WHEN NULLIF(s.street_type, '') IS NOT NULL THEN ', ' ELSE ' ' END,
                  COALESCE(l.locality_name, ''), 
                  CASE WHEN COALESCE(l.state_code, '') != '' THEN ' ' || l.state_code ELSE '' END,
-                 CASE WHEN COALESCE(l.postcode, '') != '' THEN ' ' || l.postcode ELSE '' END) as formatted_address,
+                 CASE WHEN COALESCE(COALESCE(a.postcode, l.postcode), '') != '' THEN ' ' || COALESCE(a.postcode, l.postcode) ELSE '' END) as formatted_address,
           a.latitude,
           a.longitude,
           a.coordinate_precision,
@@ -77,7 +77,7 @@ export class GeocodingService {
           s.street_type,
           l.locality_name,
           l.state_code,
-          l.postcode,
+          COALESCE(a.postcode, l.postcode) as postcode,
           CASE 
             -- Exact street match with locality gets highest score
             WHEN LOWER(a.number_first) = LOWER($2) 
@@ -253,7 +253,7 @@ export class GeocodingService {
           s.street_type,
           l.locality_name,
           l.state_code,
-          l.postcode,
+          COALESCE(a.postcode, l.postcode) as postcode,
           ST_Distance(
             ST_Transform(a.geometry, 3857),
             ST_Transform(ST_SetSRID(ST_MakePoint($2, $1), 4326), 3857)
