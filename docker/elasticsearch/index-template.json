@@ -1,0 +1,20 @@
+{
+  "index_patterns": ["gnaf-logs-*", "gnaf-alerts-*"],
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": {
+          "name": "gnaf-logs-policy",
+          "rollover_alias": "gnaf-logs"
+        },
+        "refresh_interval": "30s",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "max_result_window": 50000
+      }
+    }
+  },
+  "lifecycle": {
+    "policy": "gnaf-logs-policy"
+  }
+}

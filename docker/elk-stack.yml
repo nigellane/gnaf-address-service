@@ -14,6 +14,11 @@ services:
       - "9300:9300"
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - elk
     healthcheck:
@@ -33,6 +38,11 @@ services:
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro,Z
     environment:
       LS_JAVA_OPTS: "-Xms512m -Xmx512m"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
     networks:
       - elk
     depends_on:
