@@ -55,155 +55,225 @@ export class GeocodingService {
         throw new Error(`Invalid coordinate system: ${targetSystem}`);
       }
 
-      // Parse the input address to extract components for better matching
-      const addressParts = request.address.trim().split(/\s+/);
-      const streetNumber = addressParts[0];
+      // Try to use the existing search_vector first for better performance
+      logger.debug('Attempting vector search for geocoding', { address: request.address });
+      const searchResult = await this.performVectorSearch(request.address);
       
-      const searchQuery = `
+      if (searchResult && searchResult.length > 0) {
+        logger.info('Vector search successful, using best match', { 
+          address: request.address, 
+          resultCount: searchResult.length,
+          bestMatchPid: searchResult[0].gnaf_pid 
+        });
+        
+        // Use best match from vector search
+        const bestMatch = searchResult[0];
+        
+        const result = await this.query(`
+          SELECT 
+            a.address_detail_pid,
+            a.gnaf_pid,
+            a.formatted_address,
+            a.latitude,
+            a.longitude,
+            a.coordinate_precision,
+            a.coordinate_reliability,
+            a.number_first as street_number,
+            COALESCE(s.street_name, '') as street_name,
+            COALESCE(s.street_type, '') as street_type,
+            COALESCE(l.locality_name, '') as locality_name,
+            COALESCE(l.state_code, '') as state_code,
+            COALESCE(l.postcode, '') as postcode,
+            a.confidence_score as confidence
+          FROM gnaf.addresses a
+          LEFT JOIN gnaf.localities l ON a.locality_pid = l.locality_pid
+          LEFT JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
+          WHERE a.gnaf_pid = $1
+        `, [bestMatch.gnaf_pid]);
+        
+        if (result.rows.length > 0) {
+          return this.buildGeocodeResponse(result.rows[0], targetSystem, request);
+        }
+      }
+      
+      logger.warn('Vector search failed or returned no results, falling back to component search', { 
+        address: request.address,
+        vectorResultCount: searchResult?.length || 0
+      });
+      
+      // Fallback to component-based search only if vector search fails
+      return this.performComponentSearch(request.address, targetSystem, request);
+    } catch (error) {
+      logger.error('Geocoding failed', { 
+        address: request.address, 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        duration: Date.now() - startTime 
+      });
+      
+      return {
+        success: false,
+        coordinates: {
+          latitude: 0,
+          longitude: 0,
+          coordinateSystem: (request.coordinateSystem || 'WGS84') as 'WGS84' | 'GDA2020',
+          precision: 'REGION',
+          reliability: 3
+        },
+        confidence: 0,
+        gnafPid: ''
+      };
+    }
+  }
+
+  private async performVectorSearch(address: string): Promise<any[]> {
+    try {
+      // Use the same search preparation as AddressService for consistency
+      const searchVector = this.prepareSearchQuery(address);
+      
+      const query = `
         SELECT 
-          a.address_detail_pid,
-          a.gnaf_pid,
-          CONCAT(COALESCE(a.number_first, ''), ' ', COALESCE(s.street_name, ''), ' ', COALESCE(NULLIF(s.street_type, ''), ''), 
-                 CASE WHEN NULLIF(s.street_type, '') IS NOT NULL THEN ', ' ELSE ' ' END,
-                 COALESCE(l.locality_name, ''), 
-                 CASE WHEN COALESCE(l.state_code, '') != '' THEN ' ' || l.state_code ELSE '' END,
-                 CASE WHEN COALESCE(l.postcode, '') != '' THEN ' ' || l.postcode ELSE '' END) as formatted_address,
-          a.latitude,
-          a.longitude,
-          a.coordinate_precision,
-          a.coordinate_reliability,
-          a.number_first as street_number,
-          s.street_name,
-          s.street_type,
-          l.locality_name,
-          l.state_code,
-          l.postcode,
-          CASE 
-            -- Exact street match with locality gets highest score
-            WHEN LOWER(a.number_first) = LOWER($2) 
-                 AND LOWER(s.street_name) = LOWER($3)
-                 AND LOWER(l.locality_name) LIKE LOWER('%' || $4 || '%') THEN 95
-            -- Street number and name match
-            WHEN LOWER(a.number_first) = LOWER($2) 
-                 AND LOWER(s.street_name) LIKE LOWER('%' || $3 || '%') THEN 85
-            -- Fuzzy match on full constructed address
-            WHEN LOWER(CONCAT(COALESCE(a.number_first, ''), ' ', COALESCE(s.street_name, ''), ' ', COALESCE(l.locality_name, ''))) 
-                 LIKE LOWER('%' || $1 || '%') THEN 75
-            ELSE 50
-          END as confidence
-        FROM gnaf.addresses a
-        LEFT JOIN gnaf.localities l ON a.locality_pid = l.locality_pid
-        LEFT JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
-        WHERE a.address_status = 'CURRENT' 
-          AND a.number_first IS NOT NULL
-          AND s.street_name IS NOT NULL
-          AND l.locality_name IS NOT NULL
-          AND (
-            -- Try exact component matching first
-            (LOWER(a.number_first) = LOWER($2) AND LOWER(s.street_name) LIKE LOWER('%' || $3 || '%'))
-            OR 
-            -- Fallback to full string search
-            LOWER(CONCAT(COALESCE(a.number_first, ''), ' ', COALESCE(s.street_name, ''), ' ', COALESCE(l.locality_name, ''))) 
-            LIKE LOWER('%' || $1 || '%')
-          )
+          gnaf_pid, formatted_address, confidence_score,
+          ts_rank(search_vector, to_tsquery('english', $1)) as relevance_score
+        FROM gnaf.addresses 
+        WHERE search_vector @@ to_tsquery('english', $1)
+          AND address_status = 'CURRENT'
+          AND confidence_score >= 70
         ORDER BY 
-          CASE 
-            WHEN LOWER(a.number_first) = LOWER($2) 
-                 AND LOWER(s.street_name) = LOWER($3)
-                 AND LOWER(l.locality_name) LIKE LOWER('%' || $4 || '%') THEN 95
-            WHEN LOWER(a.number_first) = LOWER($2) 
-                 AND LOWER(s.street_name) LIKE LOWER('%' || $3 || '%') THEN 85
-            WHEN LOWER(CONCAT(COALESCE(a.number_first, ''), ' ', COALESCE(s.street_name, ''), ' ', COALESCE(l.locality_name, ''))) 
-                 LIKE LOWER('%' || $1 || '%') THEN 75
-            ELSE 50
-          END DESC,
-          a.coordinate_reliability ASC
+          GREATEST(confidence_score * 0.6, ts_rank(search_vector, to_tsquery('english', $1)) * 40) DESC
         LIMIT 5
       `;
-
-      // Extract components from "10 Bridge Rd Barwon Heads"
-      const streetName = addressParts.length > 1 ? addressParts[1] : '';
-      const locality = addressParts.length > 3 ? addressParts.slice(3).join(' ') : 
-                       addressParts.length > 2 ? addressParts[2] : '';
       
-      const result = await this.query(searchQuery, [
-        request.address.trim(),
-        streetNumber,
-        streetName,
-        locality
-      ]);
-      
-      if (result.rows.length === 0) {
-        return {
-          success: false,
-          coordinates: {
-            latitude: 0,
-            longitude: 0,
-            coordinateSystem: targetSystem,
-            precision: 'REGION',
-            reliability: 3
-          },
-          confidence: 0,
-          gnafPid: ''
-        };
-      }
-
-      const row = result.rows[0];
-      let coordinates: CoordinatePoint = {
-        latitude: parseFloat(row.latitude),
-        longitude: parseFloat(row.longitude)
-      };
-
-      if (targetSystem === 'GDA2020') {
-        coordinates = await coordinateTransform.transformCoordinates(
-          coordinates,
-          { fromSystem: 'WGS84', toSystem: 'GDA2020' }
-        );
-      }
-
-      const response: GeocodeResponse = {
-        success: true,
-        coordinates: {
-          latitude: coordinates.latitude,
-          longitude: coordinates.longitude,
-          coordinateSystem: targetSystem,
-          precision: this.mapPrecision(row.coordinate_precision),
-          reliability: parseInt(row.coordinate_reliability) as 1 | 2 | 3
-        },
-        confidence: parseInt(row.confidence),
-        gnafPid: row.gnaf_pid
-      };
-
-      if (request.includeComponents !== false) {
-        response.components = {
-          streetNumber: row.street_number,
-          streetName: row.street_name,
-          streetType: row.street_type,
-          suburb: row.locality_name,
-          state: row.state_code,
-          postcode: row.postcode || null
-        };
-      }
-
-      const duration = Date.now() - startTime;
-      logger.info('Geocoding completed', {
-        address: request.address.substring(0, 100),
-        success: response.success,
-        confidence: response.confidence,
-        duration
-      });
-
-      return response;
-      
+      const result = await this.query(query, [searchVector]);
+      return result.rows;
     } catch (error) {
-      const duration = Date.now() - startTime;
-      logger.error('Geocoding failed', {
-        address: request.address.substring(0, 100),
-        error: error instanceof Error ? error.message : 'Unknown error',
-        duration
+      logger.warn('Vector search failed, falling back to component search', {
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      throw error;
+      return [];
     }
+  }
+
+  private prepareSearchQuery(query: string): string {
+    return query
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(word => word.length > 2)
+      .map(word => `${word}:*`)
+      .join(' & ');
+  }
+
+  private async performComponentSearch(address: string, targetSystem: string, request: GeocodeRequest): Promise<GeocodeResponse> {
+    // Parse the input address to extract components for better matching
+    const addressParts = address.trim().split(/\s+/);
+    const streetNumber = addressParts[0];
+    const streetName = addressParts.length > 1 ? addressParts[1] : '';
+    const locality = addressParts.length > 3 ? addressParts.slice(3).join(' ') : 
+                     addressParts.length > 2 ? addressParts[2] : '';
+    
+    // Optimized query using indexes and avoiding complex JOINs
+    const searchQuery = `
+      SELECT 
+        a.address_detail_pid,
+        a.gnaf_pid,
+        a.formatted_address,
+        a.latitude,
+        a.longitude,
+        a.coordinate_precision,
+        a.coordinate_reliability,
+        a.number_first as street_number,
+        COALESCE(s.street_name, '') as street_name,
+        COALESCE(s.street_type, '') as street_type,
+        COALESCE(l.locality_name, '') as locality_name,
+        COALESCE(l.state_code, '') as state_code,
+        COALESCE(l.postcode, '') as postcode,
+        CASE 
+          WHEN LOWER(a.number_first) = LOWER($2) 
+               AND LOWER(s.street_name) = LOWER($3) THEN 95
+          WHEN LOWER(a.number_first) = LOWER($2) 
+               AND LOWER(s.street_name) LIKE LOWER('%' || $3 || '%') THEN 85
+          ELSE a.confidence_score
+        END as confidence
+      FROM gnaf.addresses a
+      INNER JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
+      INNER JOIN gnaf.localities l ON a.locality_pid = l.locality_pid
+      WHERE a.address_status = 'CURRENT' 
+        AND a.number_first = $2
+        AND LOWER(s.street_name) LIKE LOWER('%' || $3 || '%')
+        AND ($4 = '' OR LOWER(l.locality_name) LIKE LOWER('%' || $4 || '%'))
+      ORDER BY 
+        CASE 
+          WHEN LOWER(s.street_name) = LOWER($3) THEN 1
+          ELSE 2
+        END,
+        a.coordinate_reliability ASC,
+        a.confidence_score DESC
+      LIMIT 5
+    `;
+    
+    const result = await this.query(searchQuery, [
+      address.trim(),
+      streetNumber,
+      streetName,
+      locality
+    ]);
+      
+    if (result.rows.length === 0) {
+      return {
+        success: false,
+        coordinates: {
+          latitude: 0,
+          longitude: 0,
+          coordinateSystem: targetSystem as 'WGS84' | 'GDA2020',
+          precision: 'REGION',
+          reliability: 3
+        },
+        confidence: 0,
+        gnafPid: ''
+      };
+    }
+
+    return this.buildGeocodeResponse(result.rows[0], targetSystem, request);
+  }
+
+  private async buildGeocodeResponse(row: any, targetSystem: string, request: GeocodeRequest): Promise<GeocodeResponse> {
+    let coordinates: CoordinatePoint = {
+      latitude: parseFloat(row.latitude),
+      longitude: parseFloat(row.longitude)
+    };
+
+    if (targetSystem === 'GDA2020') {
+      coordinates = await coordinateTransform.transformCoordinates(
+        coordinates,
+        { fromSystem: 'WGS84', toSystem: 'GDA2020' }
+      );
+    }
+
+    const response: GeocodeResponse = {
+      success: true,
+      coordinates: {
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        coordinateSystem: targetSystem as 'WGS84' | 'GDA2020',
+        precision: this.mapPrecision(row.coordinate_precision),
+        reliability: parseInt(row.coordinate_reliability) as 1 | 2 | 3
+      },
+      confidence: parseInt(row.confidence || row.confidence_score),
+      gnafPid: row.gnaf_pid
+    };
+
+    if (request.includeComponents !== false) {
+      response.components = {
+        streetNumber: row.street_number,
+        streetName: row.street_name,
+        streetType: row.street_type,
+        suburb: row.locality_name,
+        state: row.state_code,
+        postcode: row.postcode || null
+      };
+    }
+
+    return response;
   }
 
   async reverseGeocode(params: ReverseGeocodeParams): Promise<ReverseGeocodeResponse> {

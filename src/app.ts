@@ -3,8 +3,19 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
+import path from 'path';
 import addressRoutes from './routes/addresses';
 import spatialRoutes from './routes/spatial';
+import healthRoutes from './routes/healthRoutes';
+import { requestTrackingMiddleware, metricsRecordingMiddleware, prometheusMetricsHandler } from './middleware/prometheusMiddleware';
+import { 
+  initializeRequestContext,
+  logIncomingRequest,
+  logOutgoingResponse,
+  errorLoggingMiddleware,
+  securityLoggingMiddleware,
+  businessMetricsMiddleware
+} from './middleware/loggingMiddleware';
 import { ApiError } from './types/api';
 import Logger from './utils/logger';
 
@@ -16,7 +27,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
     },
@@ -48,6 +59,13 @@ app.use(compression({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Enhanced logging middleware (before other middleware for proper context)
+app.use(initializeRequestContext);
+app.use(logIncomingRequest);
+app.use(logOutgoingResponse);
+app.use(securityLoggingMiddleware);
+app.use(businessMetricsMiddleware);
+
 const morganFormat = process.env.NODE_ENV === 'production' 
   ? 'combined' 
   : ':method :url :status :res[content-length] - :response-time ms';
@@ -60,22 +78,24 @@ app.use(morgan(morganFormat, {
   }
 }));
 
-app.use((req, res, next) => {
-  req.startTime = Date.now();
-  next();
+// Prometheus metrics middleware
+app.use(requestTrackingMiddleware);
+app.use(metricsRecordingMiddleware);
+
+// Prometheus metrics endpoint (before other routes for better labeling)
+app.get('/metrics', prometheusMetricsHandler);
+
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, '../public')));
+
+// Root route serves the dashboard
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
 app.use('/api/v1/addresses', addressRoutes);
 app.use('/api/v1/spatial', spatialRoutes);
-
-app.get('/api/v1/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    version: process.env.npm_package_version || '0.1.0',
-    uptime: process.uptime()
-  });
-});
+app.use('/api/v1', healthRoutes);
 
 app.use('*', (req, res) => {
   const error: ApiError = {
@@ -87,6 +107,9 @@ app.use('*', (req, res) => {
   };
   res.status(404).json(error);
 });
+
+// Enhanced error logging middleware
+app.use(errorLoggingMiddleware);
 
 app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
@@ -117,6 +140,10 @@ declare global {
   namespace Express {
     interface Request {
       startTime?: number;
+      requestId?: string;
+      userId?: string;
+      sessionId?: string;
+      correlationId?: string;
     }
   }
 }

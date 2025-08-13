@@ -1,5 +1,9 @@
 version: '3.8'
 
+networks:
+  gnaf-network:
+    driver: bridge
+
 services:
   postgres:
     image: postgis/postgis:15-3.3
@@ -14,11 +18,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+    networks:
+      - gnaf-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gnaf_user -d gnaf_db"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -27,12 +34,84 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - gnaf-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  gnaf-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: gnaf-app
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      LOG_LEVEL: debug
+      LOG_TO_FILE: true
+      DATABASE_URL: postgresql://gnaf_user:gnaf_password@postgres:5432/gnaf_db
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: "http://localhost:3000,http://localhost:3001"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./logs:/app/logs
+      - gnaf_logs:/app/logs
+    networks:
+      - gnaf-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "/app/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gnaf-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - gnaf-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  gnaf_logs:
+    driver: local

@@ -65,11 +65,12 @@ export class RedisManager {
         status: this.metrics.connectionStatus
       });
     } catch (error) {
-      logger.error('Failed to initialize Redis connection', {
+      logger.warn('Redis connection not available, running with L1 cache only', {
         error: error instanceof Error ? error.message : 'Unknown error',
         mode: this.isClusterMode ? 'cluster' : 'single'
       });
-      throw error;
+      // Don't throw error - allow application to continue without Redis
+      this.metrics.connectionStatus = 'disconnected';
     }
   }
 
@@ -86,7 +87,13 @@ export class RedisManager {
         socket: {
           connectTimeout: parseInt(process.env.REDIS_CONNECT_TIMEOUT || '10000'),
           keepAlive: 30000,
-          reconnectStrategy: (retries) => Math.min(retries * 50, 1000)
+          reconnectStrategy: (retries) => {
+            if (retries > 3) {
+              logger.warn('Redis cluster connection failed after 3 attempts, giving up');
+              return false; // Stop reconnecting after 3 attempts
+            }
+            return Math.min(retries * 50, 1000);
+          }
         }
       }
     });
@@ -102,7 +109,13 @@ export class RedisManager {
       socket: {
         connectTimeout: parseInt(process.env.REDIS_CONNECT_TIMEOUT || '10000'),
         keepAlive: 30000,
-        reconnectStrategy: (retries) => Math.min(retries * 50, 1000)
+        reconnectStrategy: (retries) => {
+          if (retries > 3) {
+            logger.warn('Redis single-node connection failed after 3 attempts, giving up');
+            return false; // Stop reconnecting after 3 attempts
+          }
+          return Math.min(retries * 50, 1000);
+        }
       }
     });
   }

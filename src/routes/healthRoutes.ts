@@ -26,17 +26,20 @@ router.get('/health', async (req: Request, res: Response) => {
     const checks = await Promise.allSettled([
       checkDatabaseHealth(),
       checkCacheHealth(),
-      checkSystemResources()
+      checkSystemResources(),
+      checkGnafDatasetHealth()
     ]);
 
     const databaseHealth = checks[0].status === 'fulfilled' ? checks[0].value : { status: 'unhealthy', error: 'Database check failed' };
     const cacheHealth = checks[1].status === 'fulfilled' ? checks[1].value : { status: 'unhealthy', error: 'Cache check failed' };
     const systemHealth = checks[2].status === 'fulfilled' ? checks[2].value : { status: 'unhealthy', error: 'System check failed' };
+    const gnafHealth = checks[3].status === 'fulfilled' ? checks[3].value : { status: 'unhealthy', error: 'G-NAF dataset check failed' };
 
     const overallStatus = (
       databaseHealth.status === 'healthy' &&
       cacheHealth.status === 'healthy' &&
-      systemHealth.status === 'healthy'
+      systemHealth.status === 'healthy' &&
+      gnafHealth.status === 'healthy'
     ) ? 'healthy' : 'degraded';
 
     const responseTime = Date.now() - startTime;
@@ -49,7 +52,8 @@ router.get('/health', async (req: Request, res: Response) => {
       checks: {
         database: databaseHealth,
         cache: cacheHealth,
-        system: systemHealth
+        system: systemHealth,
+        gnafDataset: gnafHealth
       }
     };
 
@@ -81,6 +85,7 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
       databaseHealth,
       cacheHealth,
       systemHealth,
+      gnafHealth,
       circuitBreakerHealth,
       degradationStatus,
       performanceMetrics,
@@ -89,6 +94,7 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
       checkDatabaseHealth(),
       checkCacheHealth(),
       checkSystemResources(),
+      checkGnafDatasetHealth(),
       checkCircuitBreakers(),
       checkDegradationStatus(),
       checkPerformanceMetrics(),
@@ -102,6 +108,7 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
         getValue(databaseHealth),
         getValue(cacheHealth),
         getValue(systemHealth),
+        getValue(gnafHealth),
         getValue(circuitBreakerHealth)
       ]),
       timestamp: new Date().toISOString(),
@@ -113,6 +120,7 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
         database: getValue(databaseHealth),
         cache: getValue(cacheHealth),
         system: getValue(systemHealth),
+        gnafDataset: getValue(gnafHealth),
         circuitBreakers: getValue(circuitBreakerHealth),
         degradation: getValue(degradationStatus),
         performance: getValue(performanceMetrics),
@@ -229,23 +237,72 @@ async function checkDatabaseHealth(): Promise<{ status: string; details?: any; e
     const db = DatabaseManager.getInstance();
     const startTime = Date.now();
     
-    // Simple connectivity check
-    await db.query('SELECT 1 as health_check');
+    // Enhanced connectivity check with read/write validation
+    const checks = await Promise.allSettled([
+      // Basic connectivity
+      db.query('SELECT 1 as health_check'),
+      // Check database version and extensions
+      db.query('SELECT version() as db_version, installed_version FROM pg_available_extensions WHERE name = \'postgis\''),
+      // Test a simple spatial query to ensure PostGIS is working
+      db.query('SELECT ST_Point(144.9631, -37.8136) as test_point')
+    ]);
+    
     const queryTime = Date.now() - startTime;
     
     // Get database metrics
     const metrics = await db.getMetrics();
     
+    // Analyze results
+    const basicConnectivity = checks[0].status === 'fulfilled';
+    const extensionCheck = checks[1].status === 'fulfilled' ? checks[1].value : null;
+    const spatialCheck = checks[2].status === 'fulfilled';
+    
+    let status = 'healthy';
+    const warnings = [];
+    
+    if (!basicConnectivity) {
+      status = 'unhealthy';
+    } else {
+      // Check query performance
+      if (queryTime > 1000) {
+        warnings.push('Slow database response time');
+        status = 'degraded';
+      }
+      
+      if (!spatialCheck) {
+        warnings.push('PostGIS spatial queries failing');
+        status = 'degraded';
+      }
+      
+      // Check connection pool health
+      if (metrics.totalConnections > 18) { // 90% of max pool size
+        warnings.push('High connection pool usage');
+        status = 'degraded';
+      }
+      
+      if (metrics.waitingClients > 5) {
+        warnings.push('Connection pool saturation');
+        status = 'degraded';
+      }
+    }
+    
     return {
-      status: 'healthy',
+      status,
       details: {
         queryTime: `${queryTime}ms`,
         connections: {
           total: metrics.totalConnections,
           idle: metrics.idleConnections,
-          waiting: metrics.waitingClients
+          waiting: metrics.waitingClients,
+          maxConnections: 20
         },
-        averageQueryTime: `${metrics.avgQueryTime}ms`
+        averageQueryTime: `${metrics.avgQueryTime}ms`,
+        slowQueries: metrics.slowQueries,
+        extensions: {
+          postgis: extensionCheck?.rows?.[0]?.installed_version || 'not available'
+        },
+        spatialFunctionality: spatialCheck ? 'working' : 'failed',
+        warnings: warnings.length > 0 ? warnings : undefined
       }
     };
 
@@ -262,16 +319,64 @@ async function checkDatabaseHealth(): Promise<{ status: string; details?: any; e
  */
 async function checkCacheHealth(): Promise<{ status: string; details?: any; error?: string }> {
   try {
+    const startTime = Date.now();
     const health = await redisManager.healthCheck();
+    const responseTime = Date.now() - startTime;
+    
+    let status = health.status === 'healthy' ? 'healthy' : 'unhealthy';
+    const warnings = [];
+    
+    // Check response time performance
+    if (responseTime > 500) {
+      warnings.push('Slow Redis response time');
+      if (status === 'healthy') status = 'degraded';
+    }
+    
+    // Check cache hit ratio
+    const hitRatio = redisManager.getCacheHitRatio() * 100;
+    if (hitRatio < 70 && health.metrics.commandsProcessed > 100) {
+      warnings.push('Low cache hit ratio');
+      if (status === 'healthy') status = 'degraded';
+    }
+    
+    // Check for cluster failover indicators
+    const isClusterMode = process.env.REDIS_CLUSTER_MODE === 'true';
+    let clusterHealth = null;
+    
+    if (isClusterMode) {
+      clusterHealth = {
+        mode: 'cluster',
+        connectionStatus: health.metrics.connectionStatus,
+        activeConnections: health.metrics.activeConnections
+      };
+      
+      // In cluster mode, check if we're still connected to multiple nodes
+      if (health.metrics.activeConnections < 2) {
+        warnings.push('Limited Redis cluster connectivity');
+        if (status === 'healthy') status = 'degraded';
+      }
+    } else {
+      clusterHealth = {
+        mode: 'single-node',
+        fallbackMode: health.metrics.connectionStatus !== 'connected'
+      };
+      
+      if (health.metrics.connectionStatus !== 'connected') {
+        warnings.push('Redis running in fallback mode');
+      }
+    }
     
     return {
-      status: health.status === 'healthy' ? 'healthy' : 'unhealthy',
+      status,
       details: {
         connectionStatus: health.metrics.connectionStatus,
+        responseTime: `${responseTime}ms`,
         commandsProcessed: health.metrics.commandsProcessed,
-        cacheHitRatio: `${(redisManager.getCacheHitRatio() * 100).toFixed(1)}%`,
+        cacheHitRatio: `${hitRatio.toFixed(1)}%`,
         averageResponseTime: `${health.metrics.averageResponseTime}ms`,
-        memoryUsage: health.metrics.memoryUsage
+        memoryUsage: health.metrics.memoryUsage,
+        cluster: clusterHealth,
+        warnings: warnings.length > 0 ? warnings : undefined
       }
     };
 
@@ -430,6 +535,86 @@ function calculateOverallStatus(healthChecks: Array<{ status: string }>): string
   if (unhealthyCount > 0) return 'unhealthy';
   if (degradedCount > 0) return 'degraded';
   return 'healthy';
+}
+
+/**
+ * G-NAF Dataset health check
+ */
+async function checkGnafDatasetHealth(): Promise<{ status: string; details?: any; error?: string }> {
+  try {
+    const db = DatabaseManager.getInstance();
+    const startTime = Date.now();
+    
+    // Check if G-NAF tables exist and have data
+    const tableChecks = await Promise.allSettled([
+      // Check if core G-NAF tables exist and have recent data
+      db.query(`
+        SELECT COUNT(*) as address_count 
+        FROM gnaf.addresses 
+        WHERE created_at > NOW() - INTERVAL '6 months'
+        LIMIT 1
+      `),
+      // Check dataset metadata if available
+      db.query(`
+        SELECT 
+          COUNT(*) as total_addresses,
+          MAX(created_at) as last_updated,
+          MIN(created_at) as first_created
+        FROM gnaf.addresses
+      `)
+    ]);
+
+    const queryTime = Date.now() - startTime;
+    
+    if (tableChecks[0].status === 'rejected') {
+      return {
+        status: 'unhealthy',
+        error: 'G-NAF address table not accessible or empty'
+      };
+    }
+
+    const addressCheckResult = tableChecks[0].status === 'fulfilled' ? tableChecks[0].value : null;
+    const metadataResult = tableChecks[1].status === 'fulfilled' ? tableChecks[1].value : null;
+
+    const recentAddresses = addressCheckResult?.rows?.[0]?.address_count || 0;
+    const totalAddresses = metadataResult?.rows?.[0]?.total_addresses || 0;
+    const lastUpdated = metadataResult?.rows?.[0]?.last_updated;
+    
+    // Determine health based on data freshness and availability
+    const hasRecentData = parseInt(recentAddresses) > 0;
+    const hasMinimumData = parseInt(totalAddresses) > 1000000; // At least 1M addresses expected
+    
+    let status = 'healthy';
+    const warnings = [];
+    
+    if (!hasRecentData) {
+      warnings.push('No recent address updates in last 6 months');
+      status = 'degraded';
+    }
+    
+    if (!hasMinimumData) {
+      warnings.push('Insufficient address data for reliable service');
+      status = 'degraded';
+    }
+
+    return {
+      status,
+      details: {
+        queryTime: `${queryTime}ms`,
+        totalAddresses: totalAddresses,
+        recentAddresses: recentAddresses,
+        lastUpdated: lastUpdated?.toISOString?.() || lastUpdated || 'unknown',
+        dataFreshness: hasRecentData ? 'current' : 'stale',
+        warnings: warnings.length > 0 ? warnings : undefined
+      }
+    };
+
+  } catch (error) {
+    return {
+      status: 'unhealthy',
+      error: error instanceof Error ? error.message : 'G-NAF dataset check failed'
+    };
+  }
 }
 
 export default router;
