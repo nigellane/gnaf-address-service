@@ -379,6 +379,11 @@ class GNAFImporter {
 
     logger.info(`Importing addresses from ${csvFiles.length} files`);
     
+    // Build locality cache for address formatting
+    logger.info('Building locality cache for address formatting...');
+    const localityCache = await this.buildLocalityCache();
+    logger.info(`Loaded ${Object.keys(localityCache).length} localities into cache`);
+    
     // Count total records across all files for progress tracking
     let totalRecords = 0;
     for (const csvFile of csvFiles) {
@@ -398,12 +403,38 @@ class GNAFImporter {
       const geocodingData = await this.loadGeocodingData(csvFile);
       logger.info(`Loaded ${Object.keys(geocodingData).length} geocoding records for ${path.basename(csvFile)}`);
       
-      const { processed, inserted } = await this.processAddressFile(csvFile, geocodingData);
+      const { processed, inserted } = await this.processAddressFile(csvFile, geocodingData, localityCache);
       totalProcessed += processed;
       totalInserted += inserted;
     }
     
     logger.info(`Addresses import completed: ${totalInserted}/${totalProcessed} records from ${csvFiles.length} files`);
+  }
+
+  async buildLocalityCache() {
+    logger.info('Querying database for locality information...');
+    
+    const localityQuery = `
+      SELECT 
+        locality_pid,
+        locality_name,
+        state_code,
+        postcode
+      FROM gnaf.localities
+    `;
+    
+    const result = await this.db.query(localityQuery);
+    const cache = {};
+    
+    for (const locality of result.rows) {
+      cache[locality.locality_pid] = {
+        name: locality.locality_name,
+        state: locality.state_code,
+        postcode: locality.postcode
+      };
+    }
+    
+    return cache;
   }
 
   async countFileRecords(csvFile) {
@@ -482,7 +513,7 @@ class GNAFImporter {
     return geocodingData;
   }
 
-  async processAddressFile(csvFile, geocodingData = {}) {
+  async processAddressFile(csvFile, geocodingData = {}, localityCache = {}) {
     let processedCount = 0;
     let insertedCount = 0;
     let batch = [];
@@ -503,7 +534,7 @@ class GNAFImporter {
       objectMode: true,
       transform: (record, encoding, callback) => {
         try {
-          const addressData = this.transformAddressRecord(record, geocodingData);
+          const addressData = this.transformAddressRecord(record, geocodingData, localityCache);
           
           if (addressData) {
             batch.push(addressData);
@@ -743,7 +774,7 @@ class GNAFImporter {
     }
   }
 
-  transformAddressRecord(record, geocodingData = {}) {
+  transformAddressRecord(record, geocodingData = {}, localityCache = {}) {
     try {
       // Validate required fields
       if (!record.ADDRESS_DETAIL_PID || !record.LOCALITY_PID) {
@@ -775,6 +806,15 @@ class GNAFImporter {
         return null;
       }
 
+      // Get locality information from cache
+      const locality = localityCache[record.LOCALITY_PID];
+      if (!locality) {
+        if (Math.random() < 0.001) { // Log 0.1% of missing locality cases to avoid spam
+          logger.debug(`No locality data found for LOCALITY_PID: ${record.LOCALITY_PID}`);
+        }
+        return null;
+      }
+
       // Build formatted address
       const addressParts = [];
       
@@ -796,11 +836,16 @@ class GNAFImporter {
         addressParts.push(street);
       }
       
-      if (record.LOCALITY_NAME) {
-        let locality = record.LOCALITY_NAME;
-        if (record.STATE_ABBREVIATION) locality += ` ${record.STATE_ABBREVIATION}`;
-        if (record.POSTCODE) locality += ` ${record.POSTCODE}`;
-        addressParts.push(locality);
+      // Use locality information from cache and postcode from address record
+      if (locality.name) {
+        let localityPart = locality.name;
+        if (locality.state) localityPart += ` ${locality.state}`;
+        
+        // Use postcode from address record (ADDRESS_DETAIL) first, fallback to locality postcode
+        const postcode = record.POSTCODE || locality.postcode;
+        if (postcode) localityPart += ` ${postcode}`;
+        
+        addressParts.push(localityPart);
       }
 
       const formattedAddress = addressParts.join(', ');

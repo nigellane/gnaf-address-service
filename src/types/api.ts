@@ -40,6 +40,7 @@ export interface AddressSearchParams {
   state?: string;
   postcode?: string;
   includeCoordinates?: boolean;
+  includeComponents?: boolean;
 }
 
 export interface AddressSearchResult {
@@ -50,6 +51,14 @@ export interface AddressSearchResult {
     latitude: number;
     longitude: number;
     precision: 'PROPERTY' | 'STREET' | 'LOCALITY';
+  };
+  components?: {
+    streetNumber?: string;
+    streetName: string;
+    streetType: string;
+    suburb: string;
+    state: string;
+    postcode: string;
   };
 }
 

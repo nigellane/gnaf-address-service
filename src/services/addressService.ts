@@ -29,13 +29,13 @@ export class AddressService {
 
   async searchAddresses(params: AddressSearchParams): Promise<AddressSearchResponse> {
     const startTime = Date.now();
-    const { q, limit = QUERY_LIMITS.DEFAULT, state, postcode, includeCoordinates = false } = params;
+    const { q, limit = QUERY_LIMITS.DEFAULT, state, postcode, includeCoordinates = false, includeComponents = false } = params;
     
     try {
       const queryLimit = Math.min(limit, QUERY_LIMITS.MAXIMUM);
       
       // Create cache key for search query
-      const cacheKey = `address:search:${q}:${limit}:${state || ''}:${postcode || ''}:${includeCoordinates}`;
+      const cacheKey = `address:search:${q}:${limit}:${state || ''}:${postcode || ''}:${includeCoordinates}:${includeComponents}`;
       
       // Try to get from cache first
       const cached = await cachingService.getOrSet(
@@ -43,34 +43,56 @@ export class AddressService {
         async () => {
           const searchVector = this.prepareSearchQuery(q);
           
+          // Extract potential street number from query for exact matching
+          const streetNumber = this.extractStreetNumber(q);
+          
+          const queryParams: any[] = [searchVector, streetNumber];
+          let paramIndex = 3;
+          
           let baseQuery = `
             SELECT 
-              gnaf_pid,
-              formatted_address,
-              confidence_score,
-              ${includeCoordinates ? 'latitude, longitude, coordinate_precision,' : ''}
-              ts_rank(search_vector, to_tsquery('english', $1)) as relevance_score
-            FROM gnaf.addresses 
-            WHERE search_vector @@ to_tsquery('english', $1)
+              a.gnaf_pid,
+              CONCAT_WS(' ', 
+                a.number_first, 
+                s.street_name, 
+                s.street_type,
+                l.locality_name,
+                l.state_code,
+                l.postcode
+              ) as formatted_address,
+              a.confidence_score,
+              ${includeCoordinates ? 'a.latitude, a.longitude, a.coordinate_precision,' : ''}
+              a.number_first as street_number,
+              s.street_name,
+              s.street_type,
+              l.locality_name,
+              l.state_code as state_abbreviation,
+              l.postcode,
+              ts_rank(a.search_vector, to_tsquery('english', $1)) as relevance_score,
+              CASE 
+                WHEN a.number_first = $2 THEN 100
+                ELSE 0 
+              END as street_number_bonus
+            FROM gnaf.addresses a
+            LEFT JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
+            LEFT JOIN gnaf.localities l ON s.locality_pid = l.locality_pid
+            WHERE a.search_vector @@ to_tsquery('english', $1)
           `;
           
-          const queryParams: any[] = [searchVector];
-          let paramIndex = 2;
-          
           if (state) {
-            baseQuery += ` AND state_abbreviation = $${paramIndex}`;
+            baseQuery += ` AND l.state_code = $${paramIndex}`;
             queryParams.push(state.toUpperCase());
             paramIndex++;
           }
           
           if (postcode) {
-            baseQuery += ` AND postcode = $${paramIndex}`;
+            baseQuery += ` AND l.postcode = $${paramIndex}`;
             queryParams.push(postcode);
             paramIndex++;
           }
           
           baseQuery += ` 
-            ORDER BY relevance_score DESC, confidence_score DESC 
+            ORDER BY street_number_bonus DESC, relevance_score DESC, confidence_score DESC 
             LIMIT $${paramIndex}
           `;
           queryParams.push(queryLimit);
@@ -86,6 +108,16 @@ export class AddressService {
                 latitude: parseFloat(row.latitude),
                 longitude: parseFloat(row.longitude),
                 precision: row.coordinate_precision
+              }
+            }),
+            ...(includeComponents && {
+              components: {
+                streetNumber: row.street_number,
+                streetName: row.street_name,
+                streetType: row.street_type,
+                suburb: row.locality_name,
+                state: row.state_abbreviation,
+                postcode: row.postcode || ''
               }
             })
           }));
@@ -202,13 +234,31 @@ export class AddressService {
   private async findExactMatch(address: string): Promise<any | null> {
     const query = `
       SELECT 
-        gnaf_pid, formatted_address, confidence_score,
-        latitude, longitude, coordinate_precision, coordinate_reliability,
-        street_number, street_name, street_type, 
-        locality_name, state_abbreviation, postcode
-      FROM gnaf.addresses 
-      WHERE LOWER(formatted_address) = LOWER($1)
-      ORDER BY confidence_score DESC
+        a.gnaf_pid,
+        CONCAT_WS(' ', 
+          a.number_first, 
+          s.street_name, 
+          s.street_type,
+          l.locality_name,
+          l.state_code,
+          l.postcode
+        ) as formatted_address,
+        a.confidence_score,
+        a.latitude, a.longitude, a.coordinate_precision, a.coordinate_reliability,
+        a.number_first as street_number, s.street_name, s.street_type, 
+        l.locality_name, l.state_code as state_abbreviation, l.postcode
+      FROM gnaf.addresses a
+      LEFT JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
+      LEFT JOIN gnaf.localities l ON s.locality_pid = l.locality_pid
+      WHERE LOWER(CONCAT_WS(' ', 
+        a.number_first, 
+        s.street_name, 
+        s.street_type,
+        l.locality_name,
+        l.state_code,
+        l.postcode
+      )) = LOWER($1)
+      ORDER BY a.confidence_score DESC
       LIMIT 1
     `;
     
@@ -218,22 +268,39 @@ export class AddressService {
 
   private async findFuzzyMatches(address: string, limit = QUERY_LIMITS.SUGGESTION_DEFAULT): Promise<any[]> {
     const searchVector = this.prepareSearchQuery(address);
+    const streetNumber = this.extractStreetNumber(address);
     
     const query = `
       SELECT 
-        gnaf_pid, formatted_address, confidence_score,
-        latitude, longitude, coordinate_precision, coordinate_reliability,
-        street_number, street_name, street_type,
-        locality_name, state_abbreviation, postcode,
-        ts_rank(search_vector, to_tsquery('english', $1)) as relevance_score
-      FROM gnaf.addresses 
-      WHERE search_vector @@ to_tsquery('english', $1)
+        a.gnaf_pid,
+        CONCAT_WS(' ', 
+          a.number_first, 
+          s.street_name, 
+          s.street_type,
+          l.locality_name,
+          l.state_code,
+          l.postcode
+        ) as formatted_address,
+        a.confidence_score,
+        a.latitude, a.longitude, a.coordinate_precision, a.coordinate_reliability,
+        a.number_first as street_number, s.street_name, s.street_type,
+        l.locality_name, l.state_code as state_abbreviation, l.postcode,
+        ts_rank(a.search_vector, to_tsquery('english', $1)) as relevance_score,
+        CASE 
+          WHEN a.number_first = $3 THEN 100
+          ELSE 0 
+        END as street_number_bonus
+      FROM gnaf.addresses a
+      LEFT JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
+      LEFT JOIN gnaf.localities l ON s.locality_pid = l.locality_pid
+      WHERE a.search_vector @@ to_tsquery('english', $1)
       ORDER BY 
-        GREATEST(confidence_score * 0.6, ts_rank(search_vector, to_tsquery('english', $1)) * 40) DESC
+        street_number_bonus DESC,
+        GREATEST(a.confidence_score * 0.6, ts_rank(a.search_vector, to_tsquery('english', $1)) * 40) DESC
       LIMIT $2
     `;
     
-    const result = await this.db.query(query, [searchVector, limit]);
+    const result = await this.db.query(query, [searchVector, limit, streetNumber]);
     return result.rows;
   }
 
@@ -242,19 +309,35 @@ export class AddressService {
     if (words.length === 0) return [];
     
     const searchTerms = words.join(' & ');
+    const streetNumber = this.extractStreetNumber(address);
     
     const query = `
       SELECT 
-        gnaf_pid, formatted_address, confidence_score,
-        ts_rank(search_vector, to_tsquery('english', $1)) as relevance_score
-      FROM gnaf.addresses 
-      WHERE search_vector @@ to_tsquery('english', $1)
-        AND confidence_score >= ${CONFIDENCE_THRESHOLDS.MIN_SUGGESTION}
-      ORDER BY relevance_score DESC, confidence_score DESC
+        a.gnaf_pid,
+        CONCAT_WS(' ', 
+          a.number_first, 
+          s.street_name, 
+          s.street_type,
+          l.locality_name,
+          l.state_code,
+          l.postcode
+        ) as formatted_address,
+        a.confidence_score,
+        ts_rank(a.search_vector, to_tsquery('english', $1)) as relevance_score,
+        CASE 
+          WHEN a.number_first = $3 THEN 100
+          ELSE 0 
+        END as street_number_bonus
+      FROM gnaf.addresses a
+      LEFT JOIN gnaf.streets s ON a.street_locality_pid = s.street_locality_pid
+      LEFT JOIN gnaf.localities l ON s.locality_pid = l.locality_pid
+      WHERE a.search_vector @@ to_tsquery('english', $1)
+        AND a.confidence_score >= ${CONFIDENCE_THRESHOLDS.MIN_SUGGESTION}
+      ORDER BY street_number_bonus DESC, relevance_score DESC, a.confidence_score DESC
       LIMIT $2
     `;
     
-    const result = await this.db.query(query, [searchTerms, limit]);
+    const result = await this.db.query(query, [searchTerms, limit, streetNumber]);
     return result.rows;
   }
 
@@ -353,12 +436,42 @@ export class AddressService {
   }
 
   private prepareSearchQuery(input: string): string {
-    return input
+    // Common Australian street types that might not be in search vectors
+    const streetTypes = new Set([
+      'street', 'st', 'road', 'rd', 'avenue', 'ave', 'place', 'pl', 'court', 'ct',
+      'drive', 'dr', 'lane', 'ln', 'way', 'close', 'cl', 'circuit', 'cct',
+      'grove', 'parade', 'pde', 'terrace', 'tce', 'boulevard', 'blvd', 'highway', 'hwy',
+      'crescent', 'cres', 'square', 'sq', 'esplanade', 'esp', 'walk'
+    ]);
+
+    const words = input
       .toLowerCase()
       .replace(/[^\w\s]/g, ' ')
       .split(/\s+/)
-      .filter(word => word.length > QUERY_LIMITS.MIN_WORD_LENGTH)
-      .join(' & ');
+      .filter(word => word.length > 0 && (word.length > QUERY_LIMITS.MIN_WORD_LENGTH || /^\d+$/.test(word)));
+
+    // Filter out street types as they may not be in search vectors
+    const filteredWords = words.filter(word => !streetTypes.has(word));
+    
+    // If we removed street types but still have meaningful words, use filtered version
+    // Otherwise, use original words (in case the "street type" word is actually part of a street name)
+    const finalWords = filteredWords.length > 0 ? filteredWords : words;
+    
+    // Create search query with stemming support (PostgreSQL will handle plural/singular)
+    return finalWords.map(word => {
+      // For numeric words, keep as-is for exact matching
+      if (/^\d+$/.test(word)) {
+        return word;
+      }
+      // For text words, let PostgreSQL handle stemming by using the word as-is
+      return word;
+    }).join(' & ');
+  }
+
+  private extractStreetNumber(input: string): string | null {
+    // Extract the first number from the query, which is likely the street number
+    const match = input.trim().match(/^\d+/);
+    return match ? match[0] : null;
   }
 
   private normalizeAddress(address: string): string {

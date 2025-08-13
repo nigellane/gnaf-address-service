@@ -29,7 +29,8 @@ export class AddressController {
         limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 10,
         state: req.query.state as string | undefined,
         postcode: req.query.postcode as string | undefined,
-        includeCoordinates: req.query.includeCoordinates === 'true'
+        includeCoordinates: req.query.includeCoordinates === 'true',
+        includeComponents: req.query.includeComponents === 'true'
       };
 
       if (!params.q || typeof params.q !== 'string' || params.q.trim().length === 0) {
